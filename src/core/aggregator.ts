@@ -41,6 +41,13 @@ function addToBucket(b: Bucket, t: SessionTotals): void {
   b.turnCount += t.turnCount;
 }
 
+function localYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 export function byWorkspace(sessions: Session[]): Bucket[] {
   const map = new Map<string, Bucket>();
   for (const s of sessions) {
@@ -64,7 +71,7 @@ export function byWorkspaceGroup(sessions: Session[]): Bucket[] {
 export function byDay(sessions: Session[]): Bucket[] {
   const map = new Map<string, Bucket>();
   for (const s of sessions) {
-    const key = s.startedAt.toISOString().slice(0, 10);
+    const key = localYmd(s.startedAt);
     if (!map.has(key)) map.set(key, emptyBucket(key, key));
     addToBucket(map.get(key)!, s.totals);
   }
