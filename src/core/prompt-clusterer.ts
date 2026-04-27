@@ -6,6 +6,7 @@
 // surface a noisy cluster the user can eyeball than miss a real pattern.
 
 import { Session, PromptCluster } from './types.js';
+import { clusterIdFor } from './cluster-id.js';
 
 export interface ClusterOptions {
   /** Jaccard similarity above which a prompt joins an existing cluster. */
@@ -85,12 +86,14 @@ export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): 
     .sort((a, b) => b.totalTokens - a.totalTokens)
     .slice(0, o.topN)
     .map<PromptCluster>((c) => ({
+      id: clusterIdFor(c.rep.normalized),
       representative: c.rep.text,
       size: c.members.length,
       totalTokens: c.totalTokens,
       totalCost: c.totalCost,
       workspaces: [...c.workspaces].sort(),
       examplePrompts: c.members.slice(0, 5).map((m) => m.text),
+      trigrams: [...c.rep.trigrams],
     }));
 }
 

@@ -71,12 +71,14 @@ export interface Session {
 }
 
 export interface PromptCluster {
+  id: string;
   representative: string;
   size: number;
   totalTokens: number;
   totalCost: number;
   workspaces: string[];
   examplePrompts: string[];
+  trigrams: string[];
 }
 
 export interface WasteFlag {
