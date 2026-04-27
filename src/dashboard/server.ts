@@ -23,6 +23,12 @@ import { byHourOfDay, byDayHour } from '../core/time-of-day.js';
 import { inspectAllWorkspaces, inspectGlobal } from '../core/context-inspector.js';
 import { aggregateFileReads } from '../core/file-reads.js';
 import { buildRecommendations } from '../core/recommendations.js';
+import {
+  loadConfig,
+  addDenylistEntry,
+  removeDenylistEntry,
+} from '../core/config.js';
+import { buildSkillScaffold } from '../core/skill-scaffold.js';
 
 export interface ServerOptions {
   port: number;
@@ -47,6 +53,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     );
   }
 
+  app.use(express.json());
   app.use(express.static(publicDir));
 
   // Lightweight in-memory cache so the dashboard feels snappy when you click
@@ -54,6 +61,10 @@ export async function startServer(opts: ServerOptions): Promise<void> {
   // so we use a short TTL.
   let cache: { ts: number; data: any } | null = null;
   const TTL_MS = 10_000;
+
+  function invalidateCache(): void {
+    cache = null;
+  }
 
   async function getReport() {
     if (cache && Date.now() - cache.ts < TTL_MS) return cache.data;
@@ -67,10 +78,11 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     const today = sessions.filter((s) => s.endedAt >= startOfToday);
 
     const clusters = clusterPrompts(sessions, { topN: 25 });
-    const [contextReports, globalContext, fileReads] = await Promise.all([
+    const [contextReports, globalContext, fileReads, config] = await Promise.all([
       inspectAllWorkspaces(sessions),
       inspectGlobal(),
       aggregateFileReads(sessions),
+      loadConfig(),
     ]);
     const recommendations = buildRecommendations({
       sessions,
@@ -78,6 +90,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
       contextReports,
       globalContext,
       fileReads,
+      denylist: config.clusterDenylist,
     });
 
     const data = {
@@ -101,6 +114,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
       contextReports,
       globalContext,
       fileReads,
+      denylist: config.clusterDenylist,
     };
     cache = { ts: Date.now(), data };
     return data;
@@ -117,6 +131,59 @@ export async function startServer(opts: ServerOptions): Promise<void> {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.post('/api/cluster/:id/deny', async (req, res) => {
+    const { id } = req.params;
+    const reason = req.body && (req.body as any).reason;
+    if (reason !== 'denied' && reason !== 'created') {
+      res.status(400).json({ error: 'reason must be "denied" or "created"' });
+      return;
+    }
+    try {
+      const data = await getReport();
+      const cluster = (data.clusters as any[]).find((c) => c.id === id);
+      if (!cluster) {
+        res.status(404).json({ error: `cluster ${id} not found` });
+        return;
+      }
+      await addDenylistEntry({
+        id: cluster.id,
+        reason,
+        repExcerpt: String(cluster.representative).slice(0, 200),
+        trigrams: cluster.trigrams,
+        addedAt: new Date().toISOString(),
+      });
+      invalidateCache();
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.delete('/api/cluster/:id/deny', async (req, res) => {
+    try {
+      const removed = await removeDenylistEntry(req.params.id);
+      invalidateCache();
+      res.json({ ok: true, removed });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/api/cluster/:id/scaffold', async (req, res) => {
+    try {
+      const data = await getReport();
+      const cluster = (data.clusters as any[]).find((c) => c.id === req.params.id);
+      if (!cluster) {
+        res.status(404).json({ error: `cluster ${req.params.id} not found` });
+        return;
+      }
+      const scaffold = buildSkillScaffold(cluster);
+      res.json(scaffold);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.listen(opts.port, () => {
