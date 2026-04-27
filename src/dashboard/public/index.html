@@ -64,29 +64,39 @@
 
     <section class="card">
       <h2>Recent 5-hour windows <span class="hint">how full each window got, vs your recent peak</span></h2>
-      <canvas id="chart-blocks" height="100"></canvas>
+      <div class="chart-wrap h-sm">
+        <canvas id="chart-blocks"></canvas>
+      </div>
     </section>
 
     <div class="grid-2">
       <section class="card">
         <h2>Time of day <span class="hint">when in the day you typically burn tokens</span></h2>
-        <canvas id="chart-hours" height="180"></canvas>
+        <div class="chart-wrap h-md">
+          <canvas id="chart-hours"></canvas>
+        </div>
       </section>
       <section class="card">
         <h2>Daily tokens</h2>
-        <canvas id="chart-daily" height="180"></canvas>
+        <div class="chart-wrap h-md">
+          <canvas id="chart-daily"></canvas>
+        </div>
       </section>
     </div>
 
     <div class="grid-2">
       <section class="card">
         <h2>By workspace</h2>
-        <canvas id="chart-workspaces" height="180"></canvas>
+        <div class="chart-wrap h-lg">
+          <canvas id="chart-workspaces"></canvas>
+        </div>
         <table id="table-workspaces" class="data-table"></table>
       </section>
       <section class="card">
         <h2>By model</h2>
-        <canvas id="chart-models" height="180"></canvas>
+        <div class="chart-wrap h-lg">
+          <canvas id="chart-models"></canvas>
+        </div>
         <table id="table-models" class="data-table"></table>
       </section>
     </div>

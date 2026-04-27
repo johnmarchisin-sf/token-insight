@@ -320,3 +320,11 @@ footer {
   border-radius: 4px;
   color: var(--accent);
 }
+
+.chart-wrap {
+  position: relative;
+  width: 100%;
+}
+.chart-wrap.h-sm { height: 160px; }
+.chart-wrap.h-md { height: 200px; }
+.chart-wrap.h-lg { height: 240px; }
