@@ -56,7 +56,7 @@ The new rule is checked first because it is the most specific. The other branche
 
 ### Edge case
 
-If a future user genuinely names a Conductor *project* `workspaces` / `production` / `sandbox` (so the path is `~/conductor/workspaces`), `parts.length` is 2 and the new branch's `parts.length >= 4` guard fails. They fall through to the existing rule which returns `parts[1]` = `workspaces`. The behavior is the same as today — not great, but no regression and unlikely.
+If a future user genuinely names a Conductor *project* `workspaces` / `production` / `sandbox` (so the path is `~/conductor/workspaces`), `parts.length` is 2 and the new branch's `parts.length >= 3` guard fails. They fall through to the existing rule which returns `parts[1]` = `workspaces`. The behavior is the same as today — not great, but no regression and unlikely.
 
 ## Files touched
 
