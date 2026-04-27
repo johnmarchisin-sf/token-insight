@@ -9,6 +9,7 @@ import { runBlocks } from './commands/blocks.js';
 import { runRecommend } from './commands/recommend.js';
 import { runContext } from './commands/context.js';
 import { runDraftSkill } from './commands/draft-skill.js';
+import { runUndeny } from './commands/undeny.js';
 
 const program = new Command();
 
@@ -63,6 +64,7 @@ program
   .option('--json', 'Output JSON instead of formatted text')
   .option('--days <n>', 'Limit signals to last N days', (v) => parseInt(v, 10))
   .option('--kind <k>', 'Filter by kind (skill, context, hook, subagent, model, session)')
+  .option('--show-hidden', 'Include clusters previously hidden via 👎 / "Mark as created"')
   .action(async (opts) => {
     await runRecommend(opts);
   });
@@ -84,6 +86,13 @@ program
   .option('--days <n>', 'Limit clustering window to last N days', (v) => parseInt(v, 10))
   .action(async (opts) => {
     await runDraftSkill(opts);
+  });
+
+program
+  .command('undeny <id>')
+  .description('Remove a cluster from the denylist (run `ti recommend --show-hidden` to find ids; prefix matches accepted)')
+  .action(async (id) => {
+    await runUndeny(id);
   });
 
 program

@@ -3,21 +3,24 @@ import { clusterPrompts } from '../core/prompt-clusterer.js';
 import { inspectAllWorkspaces, inspectGlobal } from '../core/context-inspector.js';
 import { aggregateFileReads } from '../core/file-reads.js';
 import { buildRecommendations, Recommendation } from '../core/recommendations.js';
+import { loadConfig } from '../core/config.js';
 import { bold, dim, warn, danger } from './format.js';
 
 export interface RecommendOpts {
   json?: boolean;
   days?: number;
   kind?: string;
+  showHidden?: boolean;
 }
 
 export async function runRecommend(opts: RecommendOpts): Promise<void> {
   const since = opts.days ? new Date(Date.now() - opts.days * 24 * 60 * 60_000) : undefined;
   const sessions = await loadAllSessions(since ? { since } : {});
-  const [contextReports, globalContext, fileReads] = await Promise.all([
+  const [contextReports, globalContext, fileReads, config] = await Promise.all([
     inspectAllWorkspaces(sessions),
     inspectGlobal(),
     aggregateFileReads(sessions),
+    loadConfig(),
   ]);
   const clusters = clusterPrompts(sessions, { topN: 25 });
 
@@ -27,6 +30,8 @@ export async function runRecommend(opts: RecommendOpts): Promise<void> {
     contextReports,
     globalContext,
     fileReads,
+    denylist: config.clusterDenylist,
+    includeHidden: opts.showHidden ?? false,
   });
   if (opts.kind) recs = recs.filter((r) => r.kind === opts.kind);
 
@@ -37,7 +42,8 @@ export async function runRecommend(opts: RecommendOpts): Promise<void> {
 
   console.log(
     bold('Optimization recommendations') +
-      (opts.days ? dim(` — last ${opts.days} days`) : dim(' — all time'))
+      (opts.days ? dim(` — last ${opts.days} days`) : dim(' — all time')) +
+      (opts.showHidden ? dim(' · including hidden') : '')
   );
   console.log();
   if (recs.length === 0) {
@@ -48,6 +54,9 @@ export async function runRecommend(opts: RecommendOpts): Promise<void> {
     console.log(`${severityBadge(r)} ${bold(r.title)}  ${dim(`[${r.kind}]`)}`);
     for (const line of r.body.split('\n')) console.log('   ' + line);
     if (r.action) console.log('   ' + dim('action: ') + r.action);
+    if (r.kind === 'skill' && r.evidence?.clusterId) {
+      console.log('   ' + dim('id:     ') + String(r.evidence.clusterId));
+    }
     console.log();
   }
 }
