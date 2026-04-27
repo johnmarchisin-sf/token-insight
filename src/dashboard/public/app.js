@@ -102,7 +102,7 @@ function recCardHtml(r) {
        </details>`
     : '';
   return `
-    <div class="rec ${r.severity}" data-cid="${escapeHtml(cid)}">
+    <div class="rec ${r.severity}"${cid ? ` data-cid="${escapeHtml(cid)}"` : ''}>
       <div class="severity">${r.severity}</div>
       <div class="body">
         <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
@@ -115,19 +115,24 @@ function recCardHtml(r) {
 }
 
 function wireRecCardEvents() {
-  for (const btn of document.querySelectorAll('.btn-hide')) {
+  const scope = document.getElementById('recs-list');
+  if (!scope) return;
+  for (const btn of scope.querySelectorAll('.btn-hide')) {
     btn.addEventListener('click', () => denyCluster(btn.dataset.cid, 'denied'));
   }
-  for (const btn of document.querySelectorAll('.btn-draft')) {
+  for (const btn of scope.querySelectorAll('.btn-draft')) {
     btn.addEventListener('click', () => {
       const cid = btn.dataset.cid;
-      const panel = document.querySelector(`details.scaffold-panel[data-cid="${cid}"]`);
-      if (!panel) return;
-      panel.open = true;
-      if (panel.dataset.loaded === '0') {
-        panel.dataset.loaded = '1';
-        loadScaffold(cid, panel);
-      }
+      const panel = scope.querySelector(`details.scaffold-panel[data-cid="${cid}"]`);
+      if (panel) panel.open = true;
+    });
+  }
+  for (const panel of scope.querySelectorAll('details.scaffold-panel')) {
+    panel.addEventListener('toggle', () => {
+      if (!panel.open) return;
+      if (panel.dataset.loaded === '1') return;
+      panel.dataset.loaded = '1';
+      loadScaffold(panel.dataset.cid, panel);
     });
   }
 }
