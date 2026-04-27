@@ -11,6 +11,8 @@
 import { Session, PromptCluster } from './types.js';
 import { ContextReport, GlobalContextReport } from './context-inspector.js';
 import { FileReadStat, rereadCandidates } from './file-reads.js';
+import { DenylistEntry } from './config.js';
+import { findDenylistMatch } from './cluster-id.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
@@ -30,11 +32,13 @@ export interface RecommendInputs {
   contextReports: ContextReport[];
   globalContext: GlobalContextReport;
   fileReads: FileReadStat[];
+  denylist?: DenylistEntry[];
+  includeHidden?: boolean;
 }
 
 export function buildRecommendations(inputs: RecommendInputs): Recommendation[] {
   const recs: Recommendation[] = [];
-  recs.push(...skillRecs(inputs.clusters));
+  recs.push(...skillRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...contextRecs(inputs.contextReports, inputs.globalContext));
   recs.push(...rereadRecs(inputs.fileReads));
   recs.push(...subagentRecs(inputs.sessions));
@@ -44,26 +48,37 @@ export function buildRecommendations(inputs: RecommendInputs): Recommendation[] 
 
 // ----- Skill candidates from prompt clusters --------------------------------
 
-function skillRecs(clusters: PromptCluster[]): Recommendation[] {
+function skillRecs(
+  clusters: PromptCluster[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+): Recommendation[] {
   const out: Recommendation[] = [];
   for (let i = 0; i < clusters.length; i++) {
     const c = clusters[i];
     if (c.size < 3) continue;
     if (c.totalTokens < 50_000) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
     out.push({
       kind: 'skill',
       severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
-      title: `Turn this into a skill — repeated ${c.size}× across ${c.workspaces.length} workspace(s)`,
+      title: `${titlePrefix}Turn this into a skill — repeated ${c.size}× across ${c.workspaces.length} workspace(s)`,
       body:
         `You've made ${c.size} similar requests that consumed ${formatTokens(c.totalTokens)} tokens combined. ` +
         `Bundling the workflow into a slash command, hook, or skill replaces the boilerplate prompt with a tight invocation. ` +
         `Representative prompt: "${truncate(c.representative, 160)}"`,
       action: `ti draft-skill --cluster ${i + 1}`,
       evidence: {
+        clusterId: c.id,
         clusterIndex: i + 1,
         size: c.size,
         totalTokens: c.totalTokens,
         workspaces: c.workspaces,
+        representative: c.representative,
+        examplePrompts: c.examplePrompts,
+        hidden: match ? match.reason : undefined,
       },
     });
   }
