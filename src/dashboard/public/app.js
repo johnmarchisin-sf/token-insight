@@ -205,26 +205,48 @@ function renderBlocksChart(blocks, peak) {
       ' ' +
       d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   });
-  const colors = ordered.map((b) => (b.isActive ? '#3fb950' : '#58a6ff'));
+  const values = ordered.map((b) => b.totalTokens);
+  const pointRadii = ordered.map((b) => (b.isActive ? 6 : 3));
+  const pointColors = ordered.map((b) => (b.isActive ? '#3fb950' : '#58a6ff'));
+  const peakLine = peak ? ordered.map(() => peak) : null;
+
+  const datasets = [
+    {
+      label: 'Tokens per 5h window',
+      data: values,
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88, 166, 255, 0.18)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: pointRadii,
+      pointBackgroundColor: pointColors,
+      pointBorderColor: pointColors,
+      borderWidth: 2,
+    },
+  ];
+  if (peakLine) {
+    datasets.push({
+      label: 'recent peak',
+      data: peakLine,
+      borderColor: '#8b949e',
+      borderDash: [5, 5],
+      borderWidth: 1,
+      pointRadius: 0,
+      fill: false,
+    });
+  }
+
   const ctx = $('chart-blocks').getContext('2d');
   if (charts.blocks) charts.blocks.destroy();
   charts.blocks = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Tokens per 5h window',
-          data: ordered.map((b) => b.totalTokens),
-          backgroundColor: colors,
-        },
-      ],
-    },
+    type: 'line',
+    data: { labels, datasets },
     options: {
       ...chartBaseOptions(),
       plugins: {
         legend: { display: false },
         tooltip: {
+          filter: (ctx) => ctx.datasetIndex === 0,
           callbacks: {
             label: (ctx) => fmtTokens(ctx.parsed.y) + ' tokens',
           },
@@ -233,9 +255,9 @@ function renderBlocksChart(blocks, peak) {
       scales: {
         x: { ticks: { color: '#8b949e', maxRotation: 60, minRotation: 30 }, grid: { color: '#1f2630' } },
         y: {
+          beginAtZero: true,
           ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) },
           grid: { color: '#1f2630' },
-          suggestedMax: peak ? peak * 1.1 : undefined,
         },
       },
     },
