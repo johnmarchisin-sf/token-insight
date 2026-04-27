@@ -193,8 +193,13 @@ function renderActive(d) {
     warn.classList.add('hidden');
   }
 
-  $('active-workspaces').textContent =
-    'workspaces this window: ' + (a.workspaces?.length ? a.workspaces.join(', ') : '(none)');
+  const fmtClock = (d) =>
+    new Date(d).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const range = `${fmtClock(a.startedAt)} – ${fmtClock(a.endsAt)}`;
+  const wsList = a.workspaces?.length ? a.workspaces.join(', ') : null;
+  $('active-workspaces').textContent = wsList
+    ? `window: ${range} · workspaces: ${wsList}`
+    : `window: ${range}`;
 }
 
 function renderBlocksChart(blocks, peak) {
