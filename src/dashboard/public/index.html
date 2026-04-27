@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>token-insight</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>token-insight</h1>
+      <p id="subtitle">Loading…</p>
+    </div>
+    <button id="refresh" type="button" title="Refresh data">Refresh</button>
+  </header>
+
+  <main>
+    <section class="card" id="recs-card">
+      <h2>Optimization recommendations <span class="hint">concrete actions to reduce token consumption</span></h2>
+      <div id="recs-list"></div>
+    </section>
+
+    <section class="active-window card" id="active-card">
+      <h2>Active 5-hour window</h2>
+      <div id="active-empty" class="empty hidden">No active window. Your last rate window has closed.</div>
+      <div id="active-content">
+        <div class="active-grid">
+          <div>
+            <div class="label">Used</div>
+            <div class="value" id="active-used">—</div>
+            <div class="bar"><div class="bar-fill" id="active-used-bar"></div></div>
+            <div class="sub" id="active-used-sub">—</div>
+          </div>
+          <div>
+            <div class="label">Window time</div>
+            <div class="value" id="active-elapsed">—</div>
+            <div class="bar"><div class="bar-fill bar-fill-time" id="active-time-bar"></div></div>
+            <div class="sub" id="active-time-sub">—</div>
+          </div>
+          <div>
+            <div class="label">Velocity</div>
+            <div class="value" id="active-velocity">—</div>
+            <div class="sub" id="active-velocity-sub">—</div>
+          </div>
+          <div>
+            <div class="label">Projected total</div>
+            <div class="value" id="active-projected">—</div>
+            <div class="sub" id="active-projected-sub">—</div>
+          </div>
+        </div>
+        <p id="active-warning" class="warning hidden"></p>
+        <p class="footnote" id="active-workspaces"></p>
+      </div>
+    </section>
+
+    <section class="kpis">
+      <div class="kpi"><div class="label">Today's tokens</div><div class="value" id="kpi-today-tokens">—</div></div>
+      <div class="kpi"><div class="label">Today's sessions</div><div class="value" id="kpi-today-sessions">—</div></div>
+      <div class="kpi"><div class="label">Recent peak window</div><div class="value" id="kpi-peak">—</div><div class="sub">last 30 days</div></div>
+      <div class="kpi"><div class="label">Workspaces</div><div class="value" id="kpi-workspaces">—</div></div>
+    </section>
+
+    <section class="card">
+      <h2>Recent 5-hour windows <span class="hint">how full each window got, vs your recent peak</span></h2>
+      <canvas id="chart-blocks" height="100"></canvas>
+    </section>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>Time of day <span class="hint">when in the day you typically burn tokens</span></h2>
+        <canvas id="chart-hours" height="180"></canvas>
+      </section>
+      <section class="card">
+        <h2>Daily tokens</h2>
+        <canvas id="chart-daily" height="180"></canvas>
+      </section>
+    </div>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>By workspace</h2>
+        <canvas id="chart-workspaces" height="180"></canvas>
+        <table id="table-workspaces" class="data-table"></table>
+      </section>
+      <section class="card">
+        <h2>By model</h2>
+        <canvas id="chart-models" height="180"></canvas>
+        <table id="table-models" class="data-table"></table>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>High-usage sessions <span class="hint">outliers, cache-bloated, or overlong — token offenders to investigate</span></h2>
+      <table id="table-waste" class="data-table"></table>
+    </section>
+
+    <section class="card">
+      <h2>Skill candidates <span class="hint">recurring prompt patterns — turn the heaviest ones into reusable skills</span></h2>
+      <div id="clusters"></div>
+    </section>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>CLAUDE.md bloat <span class="hint">workspaces with the heaviest context overhead</span></h2>
+        <table id="table-context" class="data-table"></table>
+      </section>
+      <section class="card">
+        <h2>Most-read files <span class="hint">candidates for @-import or a SessionStart hook</span></h2>
+        <table id="table-file-reads" class="data-table"></table>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <span id="generated-at"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,494 @@
+// Vanilla-JS dashboard — fetches /api/report and renders usage tracking views.
+
+const $ = (id) => document.getElementById(id);
+
+const fmtTokens = (n) => {
+  if (n == null) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(Math.round(n));
+};
+const fmtInt = (n) => (n ?? 0).toLocaleString();
+const fmtPct = (n) => `${(n * 100).toFixed(0)}%`;
+const fmtDuration = (ms) => {
+  if (ms < 0) ms = 0;
+  const totalMin = Math.floor(ms / 60_000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+};
+const truncate = (s, n) => {
+  const oneline = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return oneline.length <= n ? oneline : oneline.slice(0, n - 1) + '…';
+};
+
+const charts = {};
+const HOUR_LABELS = Array.from({ length: 24 }, (_, h) =>
+  h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`
+);
+
+async function load() {
+  $('subtitle').textContent = 'Loading…';
+  let data;
+  try {
+    const res = await fetch('/api/report');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (err) {
+    $('subtitle').textContent = 'Failed to load: ' + err.message;
+    return;
+  }
+  render(data);
+}
+
+function render(d) {
+  $('subtitle').textContent = `Across all Claude Code workspaces · ${d.sessionCount} sessions`;
+  $('generated-at').textContent = 'Generated ' + new Date(d.generatedAt).toLocaleString();
+
+  renderRecommendations(d.recommendations || []);
+  renderActive(d);
+  $('kpi-today-tokens').textContent = fmtTokens(d.todayTotals.totalTokens);
+  $('kpi-today-sessions').textContent = fmtInt(d.todayTotals.sessionCount);
+  $('kpi-peak').textContent = fmtTokens(d.peakRecent || 0);
+  $('kpi-workspaces').textContent = fmtInt(d.byWorkspace.length);
+
+  renderBlocksChart(d.recentBlocks, d.peakRecent);
+  renderHoursChart(d.hourOfDay);
+  renderDailyChart(d.byDay);
+  renderWorkspaceChart(d.byWorkspace);
+  renderModelChart(d.byModel);
+  renderWorkspaceTable(d.byWorkspace);
+  renderModelTable(d.byModel);
+  renderWasteTable(d.waste);
+  renderClusters(d.clusters);
+  renderContextTable(d.contextReports || []);
+  renderFileReadsTable(d.fileReads || []);
+}
+
+function renderRecommendations(recs) {
+  const container = $('recs-list');
+  if (!recs.length) {
+    container.innerHTML = '<p style="color:var(--text-dim);margin:0">No recommendations right now — your usage looks tidy.</p>';
+    return;
+  }
+  container.innerHTML = recs
+    .slice(0, 12)
+    .map(
+      (r) => `
+      <div class="rec ${r.severity}">
+        <div class="severity">${r.severity}</div>
+        <div class="body">
+          <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
+          <div class="desc">${escapeHtml(r.body)}</div>
+          ${r.action ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
+        </div>
+      </div>`
+    )
+    .join('');
+  if (recs.length > 12) {
+    container.innerHTML += `<p style="color:var(--text-dim);font-size:12px;margin-top:8px">${recs.length - 12} more — run <code>ti recommend</code> for the full list.</p>`;
+  }
+}
+
+function renderContextTable(reports) {
+  if (!reports.length) {
+    $('table-context').innerHTML = '<tr><td>No CLAUDE.md files found in your workspaces yet.</td></tr>';
+    return;
+  }
+  const rows = reports.slice(0, 12).map((r) => ({
+    workspace: r.workspaceName,
+    lines: String(r.files.reduce((s, f) => s + f.lines, 0)),
+    tokens: fmtTokens(r.totalEstimatedTokens),
+    issues: String(r.missingImports.length + r.bulkyImports.length),
+  }));
+  const headers = ['workspace', 'lines', 'tokens', 'issues'];
+  let html = '<thead><tr>' + headers.map((h) => `<th${h !== 'workspace' ? ' class="num"' : ''}>${h}</th>`).join('') + '</tr></thead><tbody>';
+  for (const r of rows) {
+    html +=
+      '<tr>' +
+      headers
+        .map((h) => `<td${h !== 'workspace' ? ' class="num"' : ''}>${escapeHtml(r[h])}</td>`)
+        .join('') +
+      '</tr>';
+  }
+  $('table-context').innerHTML = html + '</tbody>';
+}
+
+function renderFileReadsTable(reads) {
+  if (!reads.length) {
+    $('table-file-reads').innerHTML = '<tr><td>No high-frequency file reads detected yet.</td></tr>';
+    return;
+  }
+  const rows = reads.slice(0, 12).map((f) => ({
+    file: shortPath(f.filePath),
+    reads: String(f.totalReads),
+    sessions: String(f.sessionCount),
+    avg: f.readsPerSessionAvg.toFixed(1),
+  }));
+  const headers = ['file', 'reads', 'sessions', 'avg'];
+  let html = '<thead><tr>' + headers.map((h) => `<th${h !== 'file' ? ' class="num"' : ''}>${h}</th>`).join('') + '</tr></thead><tbody>';
+  for (const r of rows) {
+    html +=
+      '<tr>' +
+      headers
+        .map((h) => `<td${h !== 'file' ? ' class="num"' : ''}>${escapeHtml(r[h])}</td>`)
+        .join('') +
+      '</tr>';
+  }
+  $('table-file-reads').innerHTML = html + '</tbody>';
+}
+
+function shortPath(fp) {
+  const parts = String(fp).split('/').filter(Boolean);
+  return parts.slice(-3).join('/');
+}
+
+function renderActive(d) {
+  const a = d.activeBlock;
+  const p = d.activeProjection;
+  if (!a || !p) {
+    $('active-empty').classList.remove('hidden');
+    $('active-content').classList.add('hidden');
+    return;
+  }
+  $('active-empty').classList.add('hidden');
+  $('active-content').classList.remove('hidden');
+
+  // Used + bar (color reflects danger).
+  $('active-used').textContent = fmtTokens(a.totalTokens) + ' tok';
+  const usedBar = $('active-used-bar');
+  usedBar.style.width = Math.min(100, p.pctOfPeak * 100) + '%';
+  usedBar.classList.remove('warn', 'danger');
+  if (p.pctOfPeak > 0.9) usedBar.classList.add('danger');
+  else if (p.pctOfPeak > 0.7) usedBar.classList.add('warn');
+  $('active-used-sub').textContent = `${fmtPct(p.pctOfPeak)} of recent peak (${fmtTokens(p.peakRecent)})`;
+
+  // Time elapsed + bar.
+  const totalMs = p.elapsedMs + p.remainingMs;
+  const elapsedPct = totalMs > 0 ? p.elapsedMs / totalMs : 0;
+  $('active-elapsed').textContent = fmtDuration(p.elapsedMs);
+  $('active-time-bar').style.width = Math.min(100, elapsedPct * 100) + '%';
+  $('active-time-sub').textContent = `${fmtDuration(p.remainingMs)} until window resets`;
+
+  // Velocity.
+  $('active-velocity').textContent = fmtTokens(p.velocityTokensPerMin) + '/min';
+  $('active-velocity-sub').textContent = 'tokens consumed per minute since window opened';
+
+  // Projection.
+  $('active-projected').textContent = fmtTokens(p.projectedTotal);
+  $('active-projected-sub').textContent = `${fmtPct(p.pctOfPeakProjected)} of peak at this pace`;
+
+  // Warning band.
+  const warn = $('active-warning');
+  warn.classList.remove('hidden', 'danger');
+  if (p.pctOfPeakProjected > 1.2) {
+    warn.classList.add('danger');
+    warn.textContent = `At your current pace you'll exceed your recent peak by ${fmtPct(p.pctOfPeakProjected - 1)}. You're heading into rate-limit territory — consider closing heavy sessions or switching to a lighter task.`;
+  } else if (p.pctOfPeakProjected > 1.0) {
+    warn.textContent = `Projected to slightly exceed your recent peak. Watch for slowdowns toward the end of the window.`;
+  } else if (p.pctOfPeak > 0.8) {
+    warn.textContent = `Already past 80% of your typical peak window. Be deliberate about new long-running tasks.`;
+  } else {
+    warn.classList.add('hidden');
+  }
+
+  $('active-workspaces').textContent =
+    'workspaces this window: ' + (a.workspaces?.length ? a.workspaces.join(', ') : '(none)');
+}
+
+function renderBlocksChart(blocks, peak) {
+  const ordered = [...(blocks || [])].reverse(); // oldest -> newest left-to-right
+  const labels = ordered.map((b) => {
+    const d = new Date(b.startedAt);
+    return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) +
+      ' ' +
+      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  });
+  const colors = ordered.map((b) => (b.isActive ? '#3fb950' : '#58a6ff'));
+  const ctx = $('chart-blocks').getContext('2d');
+  if (charts.blocks) charts.blocks.destroy();
+  charts.blocks = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Tokens per 5h window',
+          data: ordered.map((b) => b.totalTokens),
+          backgroundColor: colors,
+        },
+      ],
+    },
+    options: {
+      ...chartBaseOptions(),
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => fmtTokens(ctx.parsed.y) + ' tokens',
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#8b949e', maxRotation: 60, minRotation: 30 }, grid: { color: '#1f2630' } },
+        y: {
+          ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) },
+          grid: { color: '#1f2630' },
+          suggestedMax: peak ? peak * 1.1 : undefined,
+        },
+      },
+    },
+  });
+}
+
+function renderHoursChart(hours) {
+  const ctx = $('chart-hours').getContext('2d');
+  if (charts.hours) charts.hours.destroy();
+  charts.hours = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: HOUR_LABELS,
+      datasets: [
+        {
+          label: 'Tokens by hour of day',
+          data: (hours || []).map((h) => h.totalTokens),
+          backgroundColor: '#bc8cff',
+        },
+      ],
+    },
+    options: {
+      ...chartBaseOptions(),
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => fmtTokens(ctx.parsed.y) + ' tokens' } },
+      },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { color: '#1f2630' } },
+        y: {
+          ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) },
+          grid: { color: '#1f2630' },
+        },
+      },
+    },
+  });
+}
+
+function renderDailyChart(byDay) {
+  const ctx = $('chart-daily').getContext('2d');
+  if (charts.daily) charts.daily.destroy();
+  charts.daily = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: byDay.map((b) => b.label),
+      datasets: [
+        {
+          label: 'Daily tokens',
+          data: byDay.map((b) => b.totalTokens),
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88, 166, 255, 0.15)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+        },
+      ],
+    },
+    options: {
+      ...chartBaseOptions(),
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => fmtTokens(ctx.parsed.y) + ' tokens' } },
+      },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { color: '#1f2630' } },
+        y: {
+          ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) },
+          grid: { color: '#1f2630' },
+        },
+      },
+    },
+  });
+}
+
+function renderWorkspaceChart(byWorkspace) {
+  // Sort by tokens (server already sorts by cost; resort here for clarity).
+  const top = [...byWorkspace].sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 12);
+  const ctx = $('chart-workspaces').getContext('2d');
+  if (charts.ws) charts.ws.destroy();
+  charts.ws = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map((b) => b.label),
+      datasets: [
+        {
+          label: 'Tokens',
+          data: top.map((b) => b.totalTokens),
+          backgroundColor: '#58a6ff',
+        },
+      ],
+    },
+    options: {
+      ...chartBaseOptions({ indexAxis: 'y' }),
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => fmtTokens(ctx.parsed.x) + ' tokens' } },
+      },
+      scales: {
+        x: { ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) }, grid: { color: '#1f2630' } },
+        y: { ticks: { color: '#8b949e' }, grid: { color: '#1f2630' } },
+      },
+    },
+  });
+}
+
+function renderModelChart(byModel) {
+  const ctx = $('chart-models').getContext('2d');
+  if (charts.model) charts.model.destroy();
+  const palette = ['#58a6ff', '#3fb950', '#f0883e', '#bc8cff', '#f85149', '#8b949e'];
+  charts.model = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: byModel.map((b) => b.label),
+      datasets: [
+        {
+          data: byModel.map((b) => b.totalTokens),
+          backgroundColor: byModel.map((_, i) => palette[i % palette.length]),
+          borderColor: '#0d1117',
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#e6edf3' } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${fmtTokens(ctx.parsed)} tokens` } },
+      },
+    },
+  });
+}
+
+function renderWorkspaceTable(byWorkspace) {
+  const rows = [...byWorkspace].sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 20);
+  $('table-workspaces').innerHTML = tableHtml(
+    [
+      { key: 'label', label: 'Workspace' },
+      { key: 'totalTokens', label: 'Tokens', num: true, fmt: fmtTokens },
+      { key: 'sessionCount', label: 'Sessions', num: true },
+      { key: 'turnCount', label: 'Turns', num: true },
+    ],
+    rows
+  );
+}
+
+function renderModelTable(byModel) {
+  $('table-models').innerHTML = tableHtml(
+    [
+      { key: 'label', label: 'Model' },
+      { key: 'totalTokens', label: 'Tokens', num: true, fmt: fmtTokens },
+      { key: 'turnCount', label: 'Turns', num: true },
+    ],
+    byModel
+  );
+}
+
+function renderWasteTable(waste) {
+  if (!waste || waste.length === 0) {
+    $('table-waste').innerHTML = '<tr><td>No flagged sessions yet.</td></tr>';
+    return;
+  }
+  const rows = waste.slice(0, 25).map((w) => ({
+    workspace: w.workspaceName,
+    when: new Date(w.startedAt).toLocaleString(),
+    tokens: fmtTokens(w.totalTokens),
+    why: w.reasons.map((r) => `<span class="tag warn">${escapeHtml(r)}</span>`).join(' '),
+  }));
+  const headers = ['workspace', 'when', 'tokens', 'why'];
+  let html = '<thead><tr>' + headers.map((h) => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+  for (const r of rows) {
+    html +=
+      '<tr>' +
+      headers
+        .map((h) => `<td${h === 'tokens' ? ' class="num"' : ''}>${r[h]}</td>`)
+        .join('') +
+      '</tr>';
+  }
+  html += '</tbody>';
+  $('table-waste').innerHTML = html;
+}
+
+function renderClusters(clusters) {
+  const container = $('clusters');
+  if (!clusters || clusters.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim)">No recurring patterns surfaced yet — give it more usage history.</p>';
+    return;
+  }
+  container.innerHTML = clusters
+    .map(
+      (c, i) => `
+    <div class="cluster">
+      <div class="meta">
+        <span><strong>#${i + 1}</strong></span>
+        <span><strong>${c.size}</strong> repetitions</span>
+        <span><strong>${fmtTokens(c.totalTokens)}</strong> tokens</span>
+        <span>workspaces: ${c.workspaces.map((w) => `<span class="tag">${escapeHtml(w)}</span>`).join('')}</span>
+      </div>
+      <div class="rep">${escapeHtml(truncate(c.representative, 600))}</div>
+      <details>
+        <summary>${c.examplePrompts.length} example prompts</summary>
+        <div class="examples">
+          ${c.examplePrompts.map((p) => `<p>${escapeHtml(truncate(p, 400))}</p>`).join('')}
+        </div>
+      </details>
+    </div>`
+    )
+    .join('');
+}
+
+function tableHtml(cols, rows) {
+  let html =
+    '<thead><tr>' +
+    cols.map((c) => `<th${c.num ? ' class="num"' : ''}>${c.label}</th>`).join('') +
+    '</tr></thead><tbody>';
+  for (const r of rows) {
+    html +=
+      '<tr>' +
+      cols
+        .map((c) => {
+          const raw = r[c.key];
+          const v = c.fmt ? c.fmt(raw) : raw;
+          return `<td${c.num ? ' class="num"' : ''}>${escapeHtml(String(v ?? ''))}</td>`;
+        })
+        .join('') +
+      '</tr>';
+  }
+  return html + '</tbody>';
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function chartBaseOptions(extra = {}) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#e6edf3' } } },
+    scales: {
+      x: { ticks: { color: '#8b949e' }, grid: { color: '#1f2630' } },
+      y: { ticks: { color: '#8b949e' }, grid: { color: '#1f2630' } },
+    },
+    ...extra,
+  };
+}
+
+$('refresh').addEventListener('click', load);
+load();
+
+// Auto-refresh active window every 30s so the live view stays accurate.
+setInterval(load, 30_000);
