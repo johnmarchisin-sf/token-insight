@@ -61,7 +61,7 @@ function render(d) {
   renderWorkspaceTable(d.byWorkspace);
   renderModelTable(d.byModel);
   renderWasteTable(d.waste);
-  renderClusters(d.clusters);
+  renderClusters(d.clusters, d.denylist || []);
   renderContextTable(d.contextReports || []);
   renderFileReadsTable(d.fileReads || []);
 }
@@ -74,20 +74,137 @@ function renderRecommendations(recs) {
   }
   container.innerHTML = recs
     .slice(0, 12)
-    .map(
-      (r) => `
-      <div class="rec ${r.severity}">
-        <div class="severity">${r.severity}</div>
-        <div class="body">
-          <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
-          <div class="desc">${escapeHtml(r.body)}</div>
-          ${r.action ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
-        </div>
-      </div>`
-    )
+    .map((r) => recCardHtml(r))
     .join('');
   if (recs.length > 12) {
     container.innerHTML += `<p style="color:var(--text-dim);font-size:12px;margin-top:8px">${recs.length - 12} more — run <code>ti recommend</code> for the full list.</p>`;
+  }
+  wireRecCardEvents();
+}
+
+function recCardHtml(r) {
+  const cid = r.evidence && r.evidence.clusterId ? String(r.evidence.clusterId) : '';
+  const isSkill = r.kind === 'skill' && cid;
+  const rep = isSkill ? truncate(r.evidence.representative || '', 320) : '';
+  const ws = isSkill && Array.isArray(r.evidence.workspaces) ? r.evidence.workspaces.join(', ') : '';
+  const inlineRep = isSkill
+    ? `<div class="rec-cluster-rep">"${escapeHtml(rep)}"</div>
+       ${ws ? `<div class="rec-workspaces">workspaces: ${escapeHtml(ws)}</div>` : ''}`
+    : '';
+  const actions = isSkill
+    ? `<div class="rec-actions">
+         <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — one-off, don't suggest again">👎 Hide</button>
+         <button class="btn-draft" data-cid="${escapeHtml(cid)}" title="Open the SKILL.md scaffold">👍 Draft skill</button>
+       </div>
+       <details class="scaffold-panel" data-cid="${escapeHtml(cid)}" data-loaded="0">
+         <summary class="scaffold-summary">Skill scaffold</summary>
+         <div class="scaffold-body"><p class="scaffold-loading">Loading scaffold…</p></div>
+       </details>`
+    : '';
+  return `
+    <div class="rec ${r.severity}" data-cid="${escapeHtml(cid)}">
+      <div class="severity">${r.severity}</div>
+      <div class="body">
+        <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
+        <div class="desc">${escapeHtml(r.body)}</div>
+        ${inlineRep}
+        ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
+        ${actions}
+      </div>
+    </div>`;
+}
+
+function wireRecCardEvents() {
+  for (const btn of document.querySelectorAll('.btn-hide')) {
+    btn.addEventListener('click', () => denyCluster(btn.dataset.cid, 'denied'));
+  }
+  for (const btn of document.querySelectorAll('.btn-draft')) {
+    btn.addEventListener('click', () => {
+      const cid = btn.dataset.cid;
+      const panel = document.querySelector(`details.scaffold-panel[data-cid="${cid}"]`);
+      if (!panel) return;
+      panel.open = true;
+      if (panel.dataset.loaded === '0') {
+        panel.dataset.loaded = '1';
+        loadScaffold(cid, panel);
+      }
+    });
+  }
+}
+
+async function denyCluster(cid, reason) {
+  if (!cid) return;
+  const card = document.querySelector(`.rec[data-cid="${cid}"]`);
+  if (card) card.style.opacity = '0.4';
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (card) card.remove();
+    load();
+  } catch (err) {
+    if (card) card.style.opacity = '1';
+    alert('Failed to hide: ' + err.message);
+  }
+}
+
+async function unhideCluster(cid) {
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/deny`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    load();
+  } catch (err) {
+    alert('Failed to unhide: ' + err.message);
+  }
+}
+
+async function loadScaffold(cid, panel) {
+  const body = panel.querySelector('.scaffold-body');
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/scaffold`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+    body.innerHTML = `
+      <div class="scaffold-block">
+        <div class="scaffold-block-head">
+          <span>SKILL.md (${escapeHtml(s.slug)}-SKILL.md)</span>
+          <button class="copy-btn" data-target="skill-${escapeHtml(cid)}">📋 Copy</button>
+        </div>
+        <pre id="skill-${escapeHtml(cid)}">${escapeHtml(s.skillBody)}</pre>
+      </div>
+      <div class="scaffold-block">
+        <div class="scaffold-block-head">
+          <span>Polish prompt</span>
+          <button class="copy-btn" data-target="polish-${escapeHtml(cid)}">📋 Copy</button>
+        </div>
+        <pre id="polish-${escapeHtml(cid)}">${escapeHtml(s.polishPrompt)}</pre>
+      </div>
+      <button class="mark-created-btn" data-cid="${escapeHtml(cid)}">✓ Mark as created — hide from future runs</button>`;
+    for (const cb of body.querySelectorAll('.copy-btn')) {
+      cb.addEventListener('click', () => copyToClipboard(cb));
+    }
+    const mark = body.querySelector('.mark-created-btn');
+    if (mark) mark.addEventListener('click', () => denyCluster(cid, 'created'));
+  } catch (err) {
+    body.innerHTML = `<p style="color:var(--danger)">Failed to load scaffold: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function copyToClipboard(btn) {
+  const target = document.getElementById(btn.dataset.target);
+  if (!target) return;
+  try {
+    await navigator.clipboard.writeText(target.textContent || '');
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = original; }, 1200);
+  } catch (err) {
+    alert('Copy failed: ' + err.message);
   }
 }
 
@@ -445,13 +562,31 @@ function renderWasteTable(waste) {
   $('table-waste').innerHTML = html;
 }
 
-function renderClusters(clusters) {
+function renderClusters(clusters, denylist) {
   const container = $('clusters');
+  const hiddenHtml = denylist.length
+    ? `<details class="hidden-clusters">
+         <summary>Hidden (${denylist.length}) — show</summary>
+         <div class="hidden-list">
+           ${denylist.map((e) => `
+             <div class="hidden-entry" data-cid="${escapeHtml(e.id)}">
+               <div class="meta">
+                 <span class="tag">${escapeHtml(e.reason)}</span>
+                 <span class="hidden-id">${escapeHtml(e.id)}</span>
+                 <span class="hidden-date">${escapeHtml(new Date(e.addedAt).toLocaleString())}</span>
+               </div>
+               <div class="hidden-rep">${escapeHtml(truncate(e.repExcerpt, 240))}</div>
+               <button class="btn-unhide" data-cid="${escapeHtml(e.id)}">↺ Unhide</button>
+             </div>`).join('')}
+         </div>
+       </details>`
+    : '';
   if (!clusters || clusters.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim)">No recurring patterns surfaced yet — give it more usage history.</p>';
+    container.innerHTML = hiddenHtml + '<p style="color:var(--text-dim)">No recurring patterns surfaced yet — give it more usage history.</p>';
+    wireUnhideEvents(container);
     return;
   }
-  container.innerHTML = clusters
+  container.innerHTML = hiddenHtml + clusters
     .map(
       (c, i) => `
     <div class="cluster">
@@ -471,6 +606,13 @@ function renderClusters(clusters) {
     </div>`
     )
     .join('');
+  wireUnhideEvents(container);
+}
+
+function wireUnhideEvents(scope) {
+  for (const btn of scope.querySelectorAll('.btn-unhide')) {
+    btn.addEventListener('click', () => unhideCluster(btn.dataset.cid));
+  }
 }
 
 function tableHtml(cols, rows) {
