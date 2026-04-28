@@ -21,6 +21,8 @@ export type RecSeverity = 'high' | 'medium' | 'low';
 
 export const SKILL_MATCH_OVERLAP = 0.5;
 export const SUBAGENT_EXPLORE_MIN = 15;
+export const BORDERLINE_MIN_RECENT_SIZE = 3;
+export const BORDERLINE_MIN_RECENT_TOKENS = 10_000;
 
 export interface Recommendation {
   kind: RecKind;
@@ -45,6 +47,7 @@ export interface RecommendInputs {
 export function buildRecommendations(inputs: RecommendInputs): Recommendation[] {
   const recs: Recommendation[] = [];
   recs.push(...skillRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false, inputs.skillCatalog ?? []));
+  recs.push(...borderlineRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...contextRecs(inputs.contextReports, inputs.globalContext));
   recs.push(...rereadRecs(inputs.fileReads));
   recs.push(...sessionSubagentRecs(inputs.sessions));
@@ -82,11 +85,13 @@ function skillRecs(
       hidden: match ? match.reason : undefined,
     };
 
+    const repShort = describeCluster(c.representative);
+
     if (matched) {
       out.push({
         kind: 'skill',
         severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
-        title: `${titlePrefix}Existing skill matches — ${matched.entry.label} — make it more available`,
+        title: `${titlePrefix}Use skill — ${matched.entry.label}: "${repShort}"`,
         body:
           `You've made ${c.size} similar requests (${formatTokens(c.totalTokens)} tokens) that look like they should ` +
           `be triggering ${matched.entry.label} (${matched.entry.source}). The skill isn't picking these up. ` +
@@ -111,13 +116,59 @@ function skillRecs(
     out.push({
       kind: 'skill',
       severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
-      title: `${titlePrefix}Turn this into a skill — repeated ${c.size}× across ${c.workspaces.length} workspace(s)`,
+      title: `${titlePrefix}Turn into skill: "${repShort}"`,
       body:
         `You've made ${c.size} similar requests that consumed ${formatTokens(c.totalTokens)} tokens combined. ` +
         `Bundling the workflow into a slash command, hook, or skill replaces the boilerplate prompt with a tight invocation. ` +
         `Representative prompt: "${truncate(c.representative, 160)}"`,
       action: `ti draft-skill --cluster ${i + 1}`,
       evidence: baseEvidence,
+    });
+  }
+  return out;
+}
+
+// Clusters that haven't yet crossed the full skill threshold (size >= 3,
+// tokens >= 50k) but are picking up steam in the last 7 days. Surfaces them as
+// low-severity recs so the user can flag them as future skills early.
+function borderlineRecs(
+  clusters: PromptCluster[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+): Recommendation[] {
+  const out: Recommendation[] = [];
+  for (let i = 0; i < clusters.length; i++) {
+    const c = clusters[i];
+    // Skip anything skillRecs already emitted.
+    if (c.size >= 3 && c.totalTokens >= 50_000) continue;
+    if (c.recentSize < BORDERLINE_MIN_RECENT_SIZE) continue;
+    if (c.recentTokens < BORDERLINE_MIN_RECENT_TOKENS) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+    const repShort = describeCluster(c.representative);
+    out.push({
+      kind: 'skill',
+      severity: 'low',
+      title: `${titlePrefix}Trending — keep an eye on: "${repShort}"`,
+      body:
+        `Below the skill threshold today (${c.size} total, ${formatTokens(c.totalTokens)} tokens), but ${c.recentSize}× ` +
+        `in the last 7 days (${formatTokens(c.recentTokens)} tokens). If this keeps repeating it's worth turning into ` +
+        `a skill before it eats more context. Hide if it's a one-off coincidence.`,
+      action: `ti draft-skill --cluster ${i + 1}`,
+      evidence: {
+        clusterId: c.id,
+        clusterIndex: i + 1,
+        size: c.size,
+        totalTokens: c.totalTokens,
+        recentSize: c.recentSize,
+        recentTokens: c.recentTokens,
+        workspaces: c.workspaces,
+        representative: c.representative,
+        examplePrompts: c.examplePrompts,
+        borderline: true,
+        hidden: match ? match.reason : undefined,
+      },
     });
   }
   return out;
@@ -131,12 +182,24 @@ interface SkillMatch {
 function bestSkillMatch(clusterTrigrams: string[], catalog: SkillCatalogEntry[]): SkillMatch | null {
   let best: SkillMatch | null = null;
   for (const entry of catalog) {
-    if (entry.descriptionTrigrams.length === 0) continue;
-    const sim = overlapCoefficient(clusterTrigrams, entry.descriptionTrigrams);
+    if (entry.referenceTrigrams.length === 0) continue;
+    const sim = overlapCoefficient(clusterTrigrams, entry.referenceTrigrams);
     if (sim < SKILL_MATCH_OVERLAP) continue;
     if (!best || sim > best.similarity) best = { entry, similarity: sim };
   }
   return best;
+}
+
+// Pulls a short, human-readable summary out of a cluster's representative
+// prompt for use in rec titles. Strips obvious boilerplate ("can you", "please",
+// "i want to") so the title leads with the verb/noun. Caps at ~70 chars.
+function describeCluster(rep: string): string {
+  const cleaned = rep
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(can you|could you|please|i want to|i'd like to|let's|hey)\s+/i, '')
+    .replace(/^(can we|could we)\s+/i, '');
+  return truncate(cleaned, 70);
 }
 
 // ----- CLAUDE.md / context bloat --------------------------------------------

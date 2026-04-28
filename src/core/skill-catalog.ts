@@ -23,7 +23,10 @@ export interface SkillCatalogEntry {
   /** Display label, e.g. "superpowers:brainstorming", "user:session-wrap", "ws:token-insight/foo" */
   label: string;
   skillPath: string;
-  descriptionTrigrams: string[];
+  /** Trigrams covering both the skill name (broken on dashes) and description, so a
+   *  cluster prompt that mentions the skill name can match even if the description
+   *  doesn't share vocabulary. */
+  referenceTrigrams: string[];
 }
 
 export async function loadSkillCatalog(workspacePaths: string[]): Promise<SkillCatalogEntry[]> {
@@ -107,7 +110,12 @@ async function pushIfValid(
   }
   const fm = parseFrontmatter(raw);
   if (!fm.name || !fm.description) return;
-  const normalized = normalize(fm.description);
+  // Treat the skill name as additional trigram source. Names like
+  // "finishing-a-development-branch" are split on dashes/underscores/colons so
+  // each token feeds the trigram set on its own ("finishing", "development",
+  // "branch") rather than being absorbed as one fused term.
+  const nameTokens = fm.name.replace(/[-_:]+/g, ' ');
+  const normalized = normalize(`${nameTokens} ${fm.description}`);
   const trigrams = [...trigramsOf(normalized)];
   if (trigrams.length === 0) return;
   out.push({
@@ -116,7 +124,7 @@ async function pushIfValid(
     source,
     label,
     skillPath: skillFile,
-    descriptionTrigrams: trigrams,
+    referenceTrigrams: trigrams,
   });
 }
 

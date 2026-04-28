@@ -34,6 +34,8 @@ interface PromptRecord {
   normalized: string;
   trigrams: Set<string>;
   workspace: string;
+  sessionId: string;
+  timestamp: Date;
   cost: number;
   tokens: number;
 }
@@ -44,7 +46,10 @@ interface ClusterAccum {
   totalCost: number;
   totalTokens: number;
   workspaces: Set<string>;
+  sessionIds: Set<string>;
 }
+
+const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): PromptCluster[] {
   const o = { ...DEFAULTS, ...opts };
@@ -70,6 +75,7 @@ export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): 
       best.totalCost += r.cost;
       best.totalTokens += r.tokens;
       best.workspaces.add(r.workspace);
+      best.sessionIds.add(r.sessionId);
     } else {
       clusters.push({
         rep: r,
@@ -77,24 +83,39 @@ export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): 
         totalCost: r.cost,
         totalTokens: r.tokens,
         workspaces: new Set([r.workspace]),
+        sessionIds: new Set([r.sessionId]),
       });
     }
   }
 
+  const cutoff = Date.now() - RECENT_WINDOW_MS;
   return clusters
     .filter((c) => c.members.length >= o.minSize)
     .sort((a, b) => b.totalTokens - a.totalTokens)
     .slice(0, o.topN)
-    .map<PromptCluster>((c) => ({
-      id: clusterIdFor(c.rep.normalized),
-      representative: c.rep.text,
-      size: c.members.length,
-      totalTokens: c.totalTokens,
-      totalCost: c.totalCost,
-      workspaces: [...c.workspaces].sort(),
-      examplePrompts: c.members.slice(0, 5).map((m) => m.text),
-      trigrams: [...c.rep.trigrams],
-    }));
+    .map<PromptCluster>((c) => {
+      let recentSize = 0;
+      let recentTokens = 0;
+      for (const m of c.members) {
+        if (m.timestamp.getTime() >= cutoff) {
+          recentSize += 1;
+          recentTokens += m.tokens;
+        }
+      }
+      return {
+        id: clusterIdFor(c.rep.normalized),
+        representative: c.rep.text,
+        size: c.members.length,
+        totalTokens: c.totalTokens,
+        totalCost: c.totalCost,
+        workspaces: [...c.workspaces].sort(),
+        examplePrompts: c.members.slice(0, 5).map((m) => m.text),
+        trigrams: [...c.rep.trigrams],
+        recentSize,
+        recentTokens,
+        sessionIds: [...c.sessionIds],
+      };
+    });
 }
 
 function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): PromptRecord[] {
@@ -130,6 +151,8 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
         normalized,
         trigrams: trigramsOf(normalized),
         workspace: s.workspaceName,
+        sessionId: s.sessionId,
+        timestamp: t.ts,
         cost,
         tokens,
       });
