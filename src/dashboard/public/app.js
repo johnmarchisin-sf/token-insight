@@ -85,21 +85,32 @@ function renderRecommendations(recs) {
 function recCardHtml(r) {
   const cid = r.evidence && r.evidence.clusterId ? String(r.evidence.clusterId) : '';
   const isSkill = r.kind === 'skill' && cid;
+  const matched = isSkill && r.evidence && r.evidence.matchedSkill ? r.evidence.matchedSkill : null;
   const rep = isSkill ? truncate(r.evidence.representative || '', 320) : '';
   const ws = isSkill && Array.isArray(r.evidence.workspaces) ? r.evidence.workspaces.join(', ') : '';
   const inlineRep = isSkill
     ? `<div class="rec-cluster-rep">"${escapeHtml(rep)}"</div>
        ${ws ? `<div class="rec-workspaces">workspaces: ${escapeHtml(ws)}</div>` : ''}`
     : '';
+  const matchedBlock = matched
+    ? `<div class="matched-skill">
+         <div class="matched-skill-head">matched skill: <strong>${escapeHtml(matched.label)}</strong> <span class="matched-skill-source">(${escapeHtml(matched.source)})</span></div>
+         <code class="matched-skill-path">${escapeHtml(matched.skillPath)}</code>
+       </div>`
+    : '';
   const actions = isSkill
-    ? `<div class="rec-actions">
-         <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — one-off, don't suggest again">👎 Hide</button>
-         <button class="btn-draft" data-cid="${escapeHtml(cid)}" title="Open the SKILL.md scaffold">👍 Draft skill</button>
-       </div>
-       <details class="scaffold-panel" data-cid="${escapeHtml(cid)}" data-loaded="0">
-         <summary class="scaffold-summary">Skill scaffold</summary>
-         <div class="scaffold-body"><p class="scaffold-loading">Loading scaffold…</p></div>
-       </details>`
+    ? matched
+      ? `<div class="rec-actions">
+           <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — irrelevant match">👎 Hide</button>
+         </div>`
+      : `<div class="rec-actions">
+           <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — one-off, don't suggest again">👎 Hide</button>
+           <button class="btn-draft" data-cid="${escapeHtml(cid)}" title="Open the SKILL.md scaffold">👍 Draft skill</button>
+         </div>
+         <details class="scaffold-panel" data-cid="${escapeHtml(cid)}" data-loaded="0">
+           <summary class="scaffold-summary">Skill scaffold</summary>
+           <div class="scaffold-body"><p class="scaffold-loading">Loading scaffold…</p></div>
+         </details>`
     : '';
   return `
     <div class="rec ${r.severity}"${cid ? ` data-cid="${escapeHtml(cid)}"` : ''}>
@@ -108,7 +119,9 @@ function recCardHtml(r) {
         <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
         <div class="desc">${escapeHtml(r.body)}</div>
         ${inlineRep}
+        ${matchedBlock}
         ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
+        ${r.action && matched ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
         ${actions}
       </div>
     </div>`;
