@@ -30,6 +30,7 @@ export const BASH_HOOK_MIN_SESSIONS = 2;
 export const BASH_HOOK_POST_EDIT_RATIO = 0.5;
 export const BASH_HOOK_SESSION_START_MIN = 5;
 export const BASH_HOOK_SESSION_START_RATIO = 0.5;
+export const CLUSTER_SUBAGENT_AVG_EXPLORE_MIN = 10;
 
 export interface Recommendation {
   kind: RecKind;
@@ -59,6 +60,7 @@ export function buildRecommendations(inputs: RecommendInputs): Recommendation[] 
   recs.push(...rereadRecs(inputs.fileReads));
   recs.push(...bashHookRecs(inputs.sessions));
   recs.push(...sessionSubagentRecs(inputs.sessions));
+  recs.push(...clusterSubagentRecs(inputs.clusters, inputs.sessions, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...subagentRecs(inputs.sessions));
   recs.push(...modelRecs(inputs.sessions));
   return recs.sort(severityOrder);
@@ -451,64 +453,135 @@ function subagentRecs(sessions: Session[]): Recommendation[] {
   return out;
 }
 
-function sessionSubagentRecs(sessions: Session[]): Recommendation[] {
-  const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
-  const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
+interface SessionExplorationProfile {
+  exploreCount: number;
+  hadEdit: boolean;
+  usedSubagent: boolean;
+}
+
+function computeSessionProfile(s: Session): SessionExplorationProfile {
+  let exploreCount = 0;
+  let hadEdit = false;
+  let usedSubagent = false;
+  let stopCounting = false;
+
+  for (const t of s.turns) {
+    if (t.isSidechain) usedSubagent = true;
+    if (!t.toolCalls) continue;
+    for (const tc of t.toolCalls) {
+      if (tc.name === 'Task') usedSubagent = true;
+      if (stopCounting) continue;
+      if (READ_TOOLS.has(tc.name)) {
+        exploreCount += 1;
+      } else if (EDIT_TOOLS.has(tc.name)) {
+        hadEdit = true;
+        stopCounting = true;
+      }
+    }
+  }
+
+  return { exploreCount, hadEdit, usedSubagent };
+}
+
+function sessionSubagentRecs(sessions: Session[]): Recommendation[] {
   interface Candidate {
     session: Session;
-    exploreCount: number;
-    hadEdit: boolean;
+    profile: SessionExplorationProfile;
   }
   const candidates: Candidate[] = [];
 
   for (const s of sessions) {
-    let exploreCount = 0;
-    let hadEdit = false;
-    let usedSubagent = false;
-    let stopCounting = false;
-
-    for (const t of s.turns) {
-      if (t.isSidechain) usedSubagent = true;
-      if (!t.toolCalls) continue;
-      for (const tc of t.toolCalls) {
-        if (tc.name === 'Task') usedSubagent = true;
-        if (stopCounting) continue;
-        if (READ_TOOLS.has(tc.name)) {
-          exploreCount += 1;
-        } else if (EDIT_TOOLS.has(tc.name)) {
-          hadEdit = true;
-          stopCounting = true;
-        }
-      }
-    }
-
-    if (usedSubagent) continue;
-    if (exploreCount < SUBAGENT_EXPLORE_MIN) continue;
-    candidates.push({ session: s, exploreCount, hadEdit });
+    const profile = computeSessionProfile(s);
+    if (profile.usedSubagent) continue;
+    if (profile.exploreCount < SUBAGENT_EXPLORE_MIN) continue;
+    candidates.push({ session: s, profile });
   }
 
-  candidates.sort((a, b) => b.exploreCount - a.exploreCount);
+  candidates.sort((a, b) => b.profile.exploreCount - a.profile.exploreCount);
   const top = candidates.slice(0, 10);
 
   return top.map((c) => ({
     kind: 'subagent' as RecKind,
-    severity: c.exploreCount > 30 ? ('high' as RecSeverity) : ('medium' as RecSeverity),
+    severity: c.profile.exploreCount > 30 ? ('high' as RecSeverity) : ('medium' as RecSeverity),
     title: `Exploration without subagent — ${c.session.workspaceName}, ${c.session.startedAt.toLocaleString()}`,
     body:
-      `This session made ${c.exploreCount} Read/Glob/Grep calls ` +
-      `${c.hadEdit ? 'before its first Edit' : 'and never edited a file'} and didn't use the Task agent. ` +
+      `This session made ${c.profile.exploreCount} Read/Glob/Grep calls ` +
+      `${c.profile.hadEdit ? 'before its first Edit' : 'and never edited a file'} and didn't use the Task agent. ` +
       `Long upfront exploration consumes the main context window — Task subagents have isolated transcripts ` +
       `that don't pollute your main session.`,
     evidence: {
       sessionId: c.session.sessionId,
       workspace: c.session.workspaceName,
-      exploreCount: c.exploreCount,
-      hadEdit: c.hadEdit,
+      exploreCount: c.profile.exploreCount,
+      hadEdit: c.profile.hadEdit,
       sessionStartedAt: c.session.startedAt.toISOString(),
     },
   }));
 }
+
+// Cluster-level subagent rec: when a recurring prompt cluster's source sessions
+// average heavy exploration without Task, the cluster itself is a subagent
+// candidate (sibling to the existing skill rec — the user can choose).
+function clusterSubagentRecs(
+  clusters: PromptCluster[],
+  sessions: Session[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+): Recommendation[] {
+  if (clusters.length === 0 || sessions.length === 0) return [];
+  const profileBySession = new Map<string, SessionExplorationProfile>();
+  for (const s of sessions) profileBySession.set(s.sessionId, computeSessionProfile(s));
+
+  const out: Recommendation[] = [];
+  for (let i = 0; i < clusters.length; i++) {
+    const c = clusters[i];
+    if (c.size < 3) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+
+    let totalExplore = 0;
+    let n = 0;
+    let anyTask = false;
+    for (const sid of c.sessionIds) {
+      const p = profileBySession.get(sid);
+      if (!p) continue;
+      if (p.usedSubagent) anyTask = true;
+      totalExplore += p.exploreCount;
+      n += 1;
+    }
+    if (n === 0) continue;
+    if (anyTask) continue; // user already uses subagents for this cluster
+    const avgExplore = totalExplore / n;
+    if (avgExplore < CLUSTER_SUBAGENT_AVG_EXPLORE_MIN) continue;
+
+    const repShort = describeCluster(c.representative);
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+    out.push({
+      kind: 'subagent',
+      severity: avgExplore > 25 ? 'high' : 'medium',
+      title: `${titlePrefix}Dispatch via Task: "${repShort}"`,
+      body:
+        `This cluster of ${c.size} similar prompts averages ${avgExplore.toFixed(1)} Read/Glob/Grep calls before any ` +
+        `edit, and you've never delegated it. When the same exploration-heavy question keeps recurring, the cleanest ` +
+        `fix isn't a skill — it's wrapping the trigger phrase in a Task dispatch so the exploration happens in an ` +
+        `isolated subagent transcript. Lower main-context cost, faster answers.`,
+      evidence: {
+        clusterId: c.id,
+        clusterIndex: i + 1,
+        size: c.size,
+        avgExplore,
+        sessionsConsidered: n,
+        workspaces: c.workspaces,
+        representative: c.representative,
+      },
+    });
+  }
+  return out;
+}
+
 
 // ----- Model usage ---------------------------------------------------------
 
