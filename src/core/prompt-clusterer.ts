@@ -137,7 +137,7 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
   return out;
 }
 
-function normalize(s: string): string {
+export function normalize(s: string): string {
   return s
     .toLowerCase()
     // Strip fenced code blocks entirely — they're not part of the request shape.
@@ -155,7 +155,7 @@ function normalize(s: string): string {
     .trim();
 }
 
-function trigramsOf(s: string): Set<string> {
+export function trigramsOf(s: string): Set<string> {
   const out = new Set<string>();
   if (s.length < 3) {
     out.add(s);
