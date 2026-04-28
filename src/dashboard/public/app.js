@@ -121,7 +121,6 @@ function recCardHtml(r) {
         ${inlineRep}
         ${matchedBlock}
         ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
-        ${r.action && matched ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
         ${actions}
       </div>
     </div>`;

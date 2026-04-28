@@ -26,6 +26,25 @@ export function jaccard(a: Iterable<string>, b: Iterable<string>): number {
   return union === 0 ? 0 : inter / union;
 }
 
+/**
+ * Set-overlap coefficient: |A ∩ B| / min(|A|, |B|).
+ *
+ * Unlike Jaccard, this isn't penalized when one set is much larger than the
+ * other — useful when comparing a short cluster trigram set against a long
+ * skill-description trigram set, where Jaccard would be capped at
+ * ~smaller/larger even on perfect overlap.
+ */
+export function overlapCoefficient(a: Iterable<string>, b: Iterable<string>): number {
+  const A = a instanceof Set ? a : new Set(a);
+  const B = b instanceof Set ? b : new Set(b);
+  const denom = Math.min(A.size, B.size);
+  if (denom === 0) return 0;
+  let inter = 0;
+  const [small, big] = A.size < B.size ? [A, B] : [B, A];
+  for (const x of small) if (big.has(x)) inter++;
+  return inter / denom;
+}
+
 export interface DenylistMatchInput {
   id: string;
   trigrams: string[];

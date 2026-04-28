@@ -14,12 +14,12 @@ import { FileReadStat, rereadCandidates } from './file-reads.js';
 import { DenylistEntry } from './config.js';
 import { findDenylistMatch } from './cluster-id.js';
 import { SkillCatalogEntry } from './skill-catalog.js';
-import { jaccard } from './cluster-id.js';
+import { overlapCoefficient } from './cluster-id.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
 
-export const SKILL_MATCH_JACCARD = 0.2;
+export const SKILL_MATCH_OVERLAP = 0.5;
 export const SUBAGENT_EXPLORE_MIN = 15;
 
 export interface Recommendation {
@@ -132,8 +132,8 @@ function bestSkillMatch(clusterTrigrams: string[], catalog: SkillCatalogEntry[])
   let best: SkillMatch | null = null;
   for (const entry of catalog) {
     if (entry.descriptionTrigrams.length === 0) continue;
-    const sim = jaccard(clusterTrigrams, entry.descriptionTrigrams);
-    if (sim < SKILL_MATCH_JACCARD) continue;
+    const sim = overlapCoefficient(clusterTrigrams, entry.descriptionTrigrams);
+    if (sim < SKILL_MATCH_OVERLAP) continue;
     if (!best || sim > best.similarity) best = { entry, similarity: sim };
   }
   return best;
