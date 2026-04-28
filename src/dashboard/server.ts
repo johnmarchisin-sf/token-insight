@@ -29,6 +29,7 @@ import {
   removeDenylistEntry,
 } from '../core/config.js';
 import { buildSkillScaffold } from '../core/skill-scaffold.js';
+import { loadSkillCatalog } from '../core/skill-catalog.js';
 
 export interface ServerOptions {
   port: number;
@@ -78,11 +79,13 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     const today = sessions.filter((s) => s.endedAt >= startOfToday);
 
     const clusters = clusterPrompts(sessions, { topN: 25 });
-    const [contextReports, globalContext, fileReads, config] = await Promise.all([
+    const workspacePaths = [...new Set(sessions.map((s) => s.workspacePath))];
+    const [contextReports, globalContext, fileReads, config, skillCatalog] = await Promise.all([
       inspectAllWorkspaces(sessions),
       inspectGlobal(),
       aggregateFileReads(sessions),
       loadConfig(),
+      loadSkillCatalog(workspacePaths),
     ]);
     const recommendations = buildRecommendations({
       sessions,
@@ -91,6 +94,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
       globalContext,
       fileReads,
       denylist: config.clusterDenylist,
+      skillCatalog,
     });
 
     const data = {

@@ -4,6 +4,7 @@ import { inspectAllWorkspaces, inspectGlobal } from '../core/context-inspector.j
 import { aggregateFileReads } from '../core/file-reads.js';
 import { buildRecommendations, Recommendation } from '../core/recommendations.js';
 import { loadConfig } from '../core/config.js';
+import { loadSkillCatalog } from '../core/skill-catalog.js';
 import { bold, dim, warn, danger } from './format.js';
 
 export interface RecommendOpts {
@@ -16,11 +17,13 @@ export interface RecommendOpts {
 export async function runRecommend(opts: RecommendOpts): Promise<void> {
   const since = opts.days ? new Date(Date.now() - opts.days * 24 * 60 * 60_000) : undefined;
   const sessions = await loadAllSessions(since ? { since } : {});
-  const [contextReports, globalContext, fileReads, config] = await Promise.all([
+  const workspacePaths = [...new Set(sessions.map((s) => s.workspacePath))];
+  const [contextReports, globalContext, fileReads, config, skillCatalog] = await Promise.all([
     inspectAllWorkspaces(sessions),
     inspectGlobal(),
     aggregateFileReads(sessions),
     loadConfig(),
+    loadSkillCatalog(workspacePaths),
   ]);
   const clusters = clusterPrompts(sessions, { topN: 25 });
 
@@ -32,6 +35,7 @@ export async function runRecommend(opts: RecommendOpts): Promise<void> {
     fileReads,
     denylist: config.clusterDenylist,
     includeHidden: opts.showHidden ?? false,
+    skillCatalog,
   });
   if (opts.kind) recs = recs.filter((r) => r.kind === opts.kind);
 
