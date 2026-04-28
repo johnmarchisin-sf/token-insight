@@ -13,9 +13,14 @@ import { ContextReport, GlobalContextReport } from './context-inspector.js';
 import { FileReadStat, rereadCandidates } from './file-reads.js';
 import { DenylistEntry } from './config.js';
 import { findDenylistMatch } from './cluster-id.js';
+import { SkillCatalogEntry } from './skill-catalog.js';
+import { jaccard } from './cluster-id.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
+
+export const SKILL_MATCH_JACCARD = 0.2;
+export const SUBAGENT_EXPLORE_MIN = 15;
 
 export interface Recommendation {
   kind: RecKind;
@@ -34,13 +39,15 @@ export interface RecommendInputs {
   fileReads: FileReadStat[];
   denylist?: DenylistEntry[];
   includeHidden?: boolean;
+  skillCatalog?: SkillCatalogEntry[];
 }
 
 export function buildRecommendations(inputs: RecommendInputs): Recommendation[] {
   const recs: Recommendation[] = [];
-  recs.push(...skillRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false));
+  recs.push(...skillRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false, inputs.skillCatalog ?? []));
   recs.push(...contextRecs(inputs.contextReports, inputs.globalContext));
   recs.push(...rereadRecs(inputs.fileReads));
+  recs.push(...sessionSubagentRecs(inputs.sessions));
   recs.push(...subagentRecs(inputs.sessions));
   recs.push(...modelRecs(inputs.sessions));
   return recs.sort(severityOrder);
@@ -52,6 +59,7 @@ function skillRecs(
   clusters: PromptCluster[],
   denylist: DenylistEntry[],
   includeHidden: boolean,
+  catalog: SkillCatalogEntry[],
 ): Recommendation[] {
   const out: Recommendation[] = [];
   for (let i = 0; i < clusters.length; i++) {
@@ -61,6 +69,45 @@ function skillRecs(
     const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
     if (match && !includeHidden) continue;
     const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+
+    const matched = bestSkillMatch(c.trigrams, catalog);
+    const baseEvidence = {
+      clusterId: c.id,
+      clusterIndex: i + 1,
+      size: c.size,
+      totalTokens: c.totalTokens,
+      workspaces: c.workspaces,
+      representative: c.representative,
+      examplePrompts: c.examplePrompts,
+      hidden: match ? match.reason : undefined,
+    };
+
+    if (matched) {
+      out.push({
+        kind: 'skill',
+        severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
+        title: `${titlePrefix}Existing skill matches — ${matched.entry.label} — make it more available`,
+        body:
+          `You've made ${c.size} similar requests (${formatTokens(c.totalTokens)} tokens) that look like they should ` +
+          `be triggering ${matched.entry.label} (${matched.entry.source}). The skill isn't picking these up. ` +
+          `Two ways to fix it: tighten the description so it triggers on these phrases, or — if the skill is ` +
+          `workspace-scoped — promote it to global.\n` +
+          `Skill file: ${matched.entry.skillPath}`,
+        action: `code ${matched.entry.skillPath}`,
+        evidence: {
+          ...baseEvidence,
+          matchedSkill: {
+            label: matched.entry.label,
+            name: matched.entry.name,
+            source: matched.entry.source,
+            skillPath: matched.entry.skillPath,
+            similarity: matched.similarity,
+          },
+        },
+      });
+      continue;
+    }
+
     out.push({
       kind: 'skill',
       severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
@@ -70,19 +117,26 @@ function skillRecs(
         `Bundling the workflow into a slash command, hook, or skill replaces the boilerplate prompt with a tight invocation. ` +
         `Representative prompt: "${truncate(c.representative, 160)}"`,
       action: `ti draft-skill --cluster ${i + 1}`,
-      evidence: {
-        clusterId: c.id,
-        clusterIndex: i + 1,
-        size: c.size,
-        totalTokens: c.totalTokens,
-        workspaces: c.workspaces,
-        representative: c.representative,
-        examplePrompts: c.examplePrompts,
-        hidden: match ? match.reason : undefined,
-      },
+      evidence: baseEvidence,
     });
   }
   return out;
+}
+
+interface SkillMatch {
+  entry: SkillCatalogEntry;
+  similarity: number;
+}
+
+function bestSkillMatch(clusterTrigrams: string[], catalog: SkillCatalogEntry[]): SkillMatch | null {
+  let best: SkillMatch | null = null;
+  for (const entry of catalog) {
+    if (entry.descriptionTrigrams.length === 0) continue;
+    const sim = jaccard(clusterTrigrams, entry.descriptionTrigrams);
+    if (sim < SKILL_MATCH_JACCARD) continue;
+    if (!best || sim > best.similarity) best = { entry, similarity: sim };
+  }
+  return best;
 }
 
 // ----- CLAUDE.md / context bloat --------------------------------------------
@@ -217,6 +271,65 @@ function subagentRecs(sessions: Session[]): Recommendation[] {
     });
   }
   return out;
+}
+
+function sessionSubagentRecs(sessions: Session[]): Recommendation[] {
+  const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
+  const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+  interface Candidate {
+    session: Session;
+    exploreCount: number;
+    hadEdit: boolean;
+  }
+  const candidates: Candidate[] = [];
+
+  for (const s of sessions) {
+    let exploreCount = 0;
+    let hadEdit = false;
+    let usedSubagent = false;
+    let stopCounting = false;
+
+    for (const t of s.turns) {
+      if (t.isSidechain) usedSubagent = true;
+      if (!t.toolCalls) continue;
+      for (const tc of t.toolCalls) {
+        if (tc.name === 'Task') usedSubagent = true;
+        if (stopCounting) continue;
+        if (READ_TOOLS.has(tc.name)) {
+          exploreCount += 1;
+        } else if (EDIT_TOOLS.has(tc.name)) {
+          hadEdit = true;
+          stopCounting = true;
+        }
+      }
+    }
+
+    if (usedSubagent) continue;
+    if (exploreCount < SUBAGENT_EXPLORE_MIN) continue;
+    candidates.push({ session: s, exploreCount, hadEdit });
+  }
+
+  candidates.sort((a, b) => b.exploreCount - a.exploreCount);
+  const top = candidates.slice(0, 10);
+
+  return top.map((c) => ({
+    kind: 'subagent' as RecKind,
+    severity: c.exploreCount > 30 ? ('high' as RecSeverity) : ('medium' as RecSeverity),
+    title: `Exploration without subagent — ${c.session.workspaceName}, ${c.session.startedAt.toLocaleString()}`,
+    body:
+      `This session made ${c.exploreCount} Read/Glob/Grep calls ` +
+      `${c.hadEdit ? 'before its first Edit' : 'and never edited a file'} and didn't use the Task agent. ` +
+      `Long upfront exploration consumes the main context window — Task subagents have isolated transcripts ` +
+      `that don't pollute your main session.`,
+    evidence: {
+      sessionId: c.session.sessionId,
+      workspace: c.session.workspaceName,
+      exploreCount: c.exploreCount,
+      hadEdit: c.hadEdit,
+      sessionStartedAt: c.session.startedAt.toISOString(),
+    },
+  }));
 }
 
 // ----- Model usage ---------------------------------------------------------
