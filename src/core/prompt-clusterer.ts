@@ -169,6 +169,15 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
 export function isSystemInjectedPrompt(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return true;
+  // Image-attachment metadata wrappers Claude Code injects when the user pastes
+  // a screenshot — never authored intent.
+  if (/^\[Image:\s/i.test(trimmed)) return true;
+  // Prompts that LEAD with an IDE/system tag are auto-generated context, even
+  // if the closing tag is missing or pushed out by truncation. Treat them as
+  // injected regardless of trailing content — the user didn't write them.
+  if (/^<(ide_opened_file|ide_selection|ide-opened-file|ide-selection|local-command-stdout|local-command-stderr|bash-stdout|bash-stderr|task-notification|system-reminder)\b/i.test(trimmed)) {
+    return true;
+  }
   // Strip known wrapper tags and their contents, then see if anything is left.
   const stripped = trimmed
     .replace(/<command-name>[\s\S]*?<\/command-name>/gi, '')
@@ -184,6 +193,11 @@ export function isSystemInjectedPrompt(raw: string): boolean {
     .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/gi, '')
     .replace(/<local-command-stderr>[\s\S]*?<\/local-command-stderr>/gi, '')
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '')
+    // IDE-context wrappers (file-opened, file-selection notifications).
+    .replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/gi, '')
+    .replace(/<ide_selection>[\s\S]*?<\/ide_selection>/gi, '')
+    .replace(/<ide-opened-file>[\s\S]*?<\/ide-opened-file>/gi, '')
+    .replace(/<ide-selection>[\s\S]*?<\/ide-selection>/gi, '')
     .trim();
   if (stripped.length === 0) return true;
   // Pure slash command (e.g. "/compact", "/clear") — built-ins, not skill work.

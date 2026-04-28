@@ -15,6 +15,7 @@ import { DenylistEntry } from './config.js';
 import { findDenylistMatch } from './cluster-id.js';
 import { SkillCatalogEntry } from './skill-catalog.js';
 import { overlapCoefficient } from './cluster-id.js';
+import { BashPattern, extractBashPatterns } from './bash-patterns.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
@@ -23,6 +24,12 @@ export const SKILL_MATCH_OVERLAP = 0.5;
 export const SUBAGENT_EXPLORE_MIN = 15;
 export const BORDERLINE_MIN_RECENT_SIZE = 3;
 export const BORDERLINE_MIN_RECENT_TOKENS = 10_000;
+// Wide-net thresholds — easy to tune up once we see real recs.
+export const BASH_HOOK_MIN_COUNT = 5;
+export const BASH_HOOK_MIN_SESSIONS = 2;
+export const BASH_HOOK_POST_EDIT_RATIO = 0.5;
+export const BASH_HOOK_SESSION_START_MIN = 5;
+export const BASH_HOOK_SESSION_START_RATIO = 0.5;
 
 export interface Recommendation {
   kind: RecKind;
@@ -50,6 +57,7 @@ export function buildRecommendations(inputs: RecommendInputs): Recommendation[] 
   recs.push(...borderlineRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...contextRecs(inputs.contextReports, inputs.globalContext));
   recs.push(...rereadRecs(inputs.fileReads));
+  recs.push(...bashHookRecs(inputs.sessions));
   recs.push(...sessionSubagentRecs(inputs.sessions));
   recs.push(...subagentRecs(inputs.sessions));
   recs.push(...modelRecs(inputs.sessions));
@@ -298,6 +306,113 @@ function rereadRecs(fileReads: FileReadStat[]): Recommendation[] {
   }
   return out;
 }
+
+// ----- Repeated bash commands → PostToolUse / SessionStart hook -------------
+
+function bashHookRecs(sessions: Session[]): Recommendation[] {
+  const patterns = extractBashPatterns(sessions);
+  const out: Recommendation[] = [];
+
+  for (const p of patterns) {
+    if (p.count < BASH_HOOK_MIN_COUNT) continue;
+    // Skip single-session patterns — that's just iteration on one task, not a
+    // habit worth hooking.
+    if (p.sessionCount < BASH_HOOK_MIN_SESSIONS) continue;
+    const example = p.examples[0] || p.shape;
+
+    const postEditRatio = p.postEditCount / p.count;
+    if (postEditRatio >= BASH_HOOK_POST_EDIT_RATIO && p.postEditCount >= BASH_HOOK_MIN_COUNT) {
+      out.push({
+        kind: 'hook',
+        severity: p.count > 25 ? 'high' : 'medium',
+        title: `Hook candidate (PostToolUse): "${truncate(example, 60)}"`,
+        body:
+          `"${example}" runs ${p.count}× across ${p.sessionCount} session(s) in ${p.workspaceCount} workspace(s), ` +
+          `${Math.round(postEditRatio * 100)}% of the time right after a file edit. Adding it as a PostToolUse hook ` +
+          `on Edit|Write|MultiEdit means it runs automatically — no more typing it. Drop the snippet below into ` +
+          `~/.claude/settings.json (global) or <workspace>/.claude/settings.json (project-local).`,
+        action: '~/.claude/settings.json',
+        evidence: {
+          shape: p.shape,
+          example,
+          count: p.count,
+          sessionCount: p.sessionCount,
+          workspaceCount: p.workspaceCount,
+          postEditCount: p.postEditCount,
+          postEditRatio,
+          hookSnippet: renderPostEditHook(example),
+        },
+      });
+      continue;
+    }
+
+    const sessionStartRatio = p.sessionStartCount / p.sessionCount;
+    if (
+      p.sessionStartCount >= BASH_HOOK_SESSION_START_MIN &&
+      sessionStartRatio >= BASH_HOOK_SESSION_START_RATIO
+    ) {
+      out.push({
+        kind: 'hook',
+        severity: 'medium',
+        title: `Hook candidate (SessionStart): "${truncate(example, 60)}"`,
+        body:
+          `"${example}" runs at the start of ${p.sessionStartCount} session(s) (${Math.round(sessionStartRatio * 100)}% ` +
+          `of sessions where it's used at all). Promoting this to a SessionStart hook means it runs once per session ` +
+          `automatically — and the result is cached, not re-typed. Drop the snippet below into your settings.json.`,
+        action: '~/.claude/settings.json',
+        evidence: {
+          shape: p.shape,
+          example,
+          count: p.count,
+          sessionCount: p.sessionCount,
+          workspaceCount: p.workspaceCount,
+          sessionStartCount: p.sessionStartCount,
+          sessionStartRatio,
+          hookSnippet: renderSessionStartHook(example),
+        },
+      });
+    }
+  }
+
+  return out;
+}
+
+function renderPostEditHook(command: string): string {
+  return [
+    '{',
+    '  "hooks": {',
+    '    "PostToolUse": [',
+    '      {',
+    '        "matcher": "Edit|Write|MultiEdit",',
+    '        "hooks": [',
+    `          { "type": "command", "command": ${JSON.stringify(command)} }`,
+    '        ]',
+    '      }',
+    '    ]',
+    '  }',
+    '}',
+  ].join('\n');
+}
+
+function renderSessionStartHook(command: string): string {
+  return [
+    '{',
+    '  "hooks": {',
+    '    "SessionStart": [',
+    '      {',
+    '        "hooks": [',
+    `          { "type": "command", "command": ${JSON.stringify(command)} }`,
+    '        ]',
+    '      }',
+    '    ]',
+    '  }',
+    '}',
+  ].join('\n');
+}
+
+// Re-export so tests / future callers can use the shape directly.
+export { extractBashPatterns };
+export type { BashPattern };
 
 // ----- Subagent opportunities -----------------------------------------------
 

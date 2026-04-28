@@ -107,6 +107,17 @@ function recCardHtml(r) {
          <code class="matched-skill-path">${escapeHtml(matched.skillPath)}</code>
        </div>`
     : '';
+  const hookSnippet = ev.hookSnippet ? String(ev.hookSnippet) : '';
+  const hookId = `hook-${cid || Math.random().toString(36).slice(2, 8)}`;
+  const hookBlock = hookSnippet
+    ? `<div class="hook-snippet">
+         <div class="hook-snippet-head">
+           <span>settings.json snippet</span>
+           <button class="copy-btn" data-target="${hookId}">📋 Copy</button>
+         </div>
+         <pre id="${hookId}">${escapeHtml(hookSnippet)}</pre>
+       </div>`
+    : '';
   const actions = isSkill
     ? matched
       ? `<div class="rec-actions">
@@ -135,6 +146,7 @@ function recCardHtml(r) {
         <div class="desc">${escapeHtml(r.body)}</div>
         ${inlineRep}
         ${matchedBlock}
+        ${hookBlock}
         ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
         ${actions}
       </div>
@@ -161,6 +173,9 @@ function wireRecCardEvents() {
       panel.dataset.loaded = '1';
       loadScaffold(panel.dataset.cid, panel);
     });
+  }
+  for (const btn of scope.querySelectorAll('.hook-snippet .copy-btn')) {
+    btn.addEventListener('click', () => copyToClipboard(btn));
   }
 }
 

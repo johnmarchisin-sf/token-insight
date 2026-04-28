@@ -528,3 +528,30 @@ footer {
 .tip-none {
   color: var(--text-dim);
 }
+
+.hook-snippet {
+  margin-top: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.hook-snippet-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-elev-2);
+  border-bottom: 1px solid var(--border);
+}
+.hook-snippet pre {
+  margin: 0;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre;
+  overflow-x: auto;
+}
