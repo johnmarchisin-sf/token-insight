@@ -87,10 +87,19 @@ function recCardHtml(r) {
   const isSkill = r.kind === 'skill' && cid;
   const matched = isSkill && r.evidence && r.evidence.matchedSkill ? r.evidence.matchedSkill : null;
   const rep = isSkill ? truncate(r.evidence.representative || '', 320) : '';
-  const ws = isSkill && Array.isArray(r.evidence.workspaces) ? r.evidence.workspaces.join(', ') : '';
+  const ws = isSkill && Array.isArray(r.evidence.workspaces) ? r.evidence.workspaces : [];
+  const ev = r.evidence || {};
+
+  // Compact stats line — only show fields the rec actually has.
+  const stats = [];
+  if (isSkill && typeof ev.size === 'number') stats.push(`${ev.size}×`);
+  if (isSkill && typeof ev.totalTokens === 'number') stats.push(`${fmtTokens(ev.totalTokens)} tok`);
+  if (isSkill && ws.length) stats.push(`${ws.length} workspace${ws.length === 1 ? '' : 's'}`);
+  const statsLine = stats.length ? `<span class="rec-stats">${stats.join(' · ')}</span>` : '';
+
   const inlineRep = isSkill
     ? `<div class="rec-cluster-rep">"${escapeHtml(rep)}"</div>
-       ${ws ? `<div class="rec-workspaces">workspaces: ${escapeHtml(ws)}</div>` : ''}`
+       ${ws.length ? `<div class="rec-workspaces">workspaces: ${escapeHtml(ws.join(', '))}</div>` : ''}`
     : '';
   const matchedBlock = matched
     ? `<div class="matched-skill">
@@ -112,18 +121,24 @@ function recCardHtml(r) {
            <div class="scaffold-body"><p class="scaffold-loading">Loading scaffold…</p></div>
          </details>`
     : '';
+  // Auto-expand high-severity recs so the worst ones aren't hidden behind a click.
+  const openAttr = r.severity === 'high' ? ' open' : '';
   return `
-    <div class="rec ${r.severity}"${cid ? ` data-cid="${escapeHtml(cid)}"` : ''}>
-      <div class="severity">${r.severity}</div>
-      <div class="body">
-        <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
+    <details class="rec ${r.severity}"${openAttr}${cid ? ` data-cid="${escapeHtml(cid)}"` : ''}>
+      <summary class="rec-summary">
+        <span class="severity">${r.severity}</span>
+        <span class="rec-title">${escapeHtml(r.title)}</span>
+        ${statsLine}
+        <span class="kind">${escapeHtml(r.kind)}</span>
+      </summary>
+      <div class="rec-details">
         <div class="desc">${escapeHtml(r.body)}</div>
         ${inlineRep}
         ${matchedBlock}
         ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
         ${actions}
       </div>
-    </div>`;
+    </details>`;
 }
 
 function wireRecCardEvents() {
@@ -554,19 +569,42 @@ function renderModelTable(byModel) {
   );
 }
 
+// Maps a waste-detector reason tag to a one-line action the user can take.
+// Matches the tag's leading keyword so the suffix details (multipliers, %, etc.)
+// don't break the lookup.
+function tipForReason(reason) {
+  if (reason.startsWith('outlier')) return 'Break work into smaller sessions.';
+  if (reason.startsWith('cache-bloated')) return 'Trim CLAUDE.md / @-imports — context overhead is high.';
+  if (reason.startsWith('bloated turns')) return 'Narrow Read ranges; use head_limit on Grep; avoid dumping huge tool outputs.';
+  if (reason.startsWith('long idle gap')) return 'Start a fresh session instead of resuming after a long pause.';
+  return '';
+}
+
 function renderWasteTable(waste) {
   if (!waste || waste.length === 0) {
     $('table-waste').innerHTML = '<tr><td>No flagged sessions yet.</td></tr>';
     return;
   }
-  const rows = waste.slice(0, 25).map((w) => ({
-    workspace: w.workspaceName,
-    when: new Date(w.startedAt).toLocaleString(),
-    tokens: fmtTokens(w.totalTokens),
-    why: w.reasons.map((r) => `<span class="tag warn">${escapeHtml(r)}</span>`).join(' '),
-  }));
-  const headers = ['workspace', 'when', 'tokens', 'why'];
-  let html = '<thead><tr>' + headers.map((h) => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+  const rows = waste.slice(0, 25).map((w) => {
+    const tips = w.reasons
+      .map(tipForReason)
+      .filter(Boolean)
+      .map((t) => `<div class="tip">${escapeHtml(t)}</div>`)
+      .join('');
+    return {
+      workspace: escapeHtml(w.workspaceName),
+      when: escapeHtml(new Date(w.startedAt).toLocaleString()),
+      tokens: escapeHtml(fmtTokens(w.totalTokens)),
+      why: w.reasons.map((r) => `<span class="tag warn">${escapeHtml(r)}</span>`).join(' '),
+      todo: tips || '<span class="tip-none">—</span>',
+    };
+  });
+  const headers = ['workspace', 'when', 'tokens', 'why', 'todo'];
+  const headerLabels = { workspace: 'workspace', when: 'when', tokens: 'tokens', why: 'why', todo: 'what to do' };
+  let html =
+    '<thead><tr>' +
+    headers.map((h) => `<th${h === 'tokens' ? ' class="num"' : ''}>${headerLabels[h]}</th>`).join('') +
+    '</tr></thead><tbody>';
   for (const r of rows) {
     html +=
       '<tr>' +

@@ -106,6 +106,7 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
       const t = s.turns[i];
       if (t.role !== 'user') continue;
       if (!t.promptText) continue;
+      if (isSystemInjectedPrompt(t.promptText)) continue;
       const normalized = normalize(t.promptText);
       if (normalized.length < o.minPromptChars) continue;
       if (normalized.length > o.maxPromptChars) continue;
@@ -135,6 +136,36 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
     }
   }
   return out;
+}
+
+// Drops prompts that are system-injected XML wrappers (slash-command echoes,
+// task-notification payloads, bash-input wrappers, command-stdout dumps) or
+// pure slash commands with no real intent text. These aren't authored requests
+// — they're harness plumbing — so clustering them produces nonsense recs like
+// "turn /compact into a skill."
+export function isSystemInjectedPrompt(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  // Strip known wrapper tags and their contents, then see if anything is left.
+  const stripped = trimmed
+    .replace(/<command-name>[\s\S]*?<\/command-name>/gi, '')
+    .replace(/<command-message>[\s\S]*?<\/command-message>/gi, '')
+    .replace(/<command-args>[\s\S]*?<\/command-args>/gi, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, '')
+    .replace(/<task-id>[\s\S]*?<\/task-id>/gi, '')
+    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/gi, '')
+    .replace(/<output-file>[\s\S]*?<\/output-file>/gi, '')
+    .replace(/<bash-input>[\s\S]*?<\/bash-input>/gi, '')
+    .replace(/<bash-stdout>[\s\S]*?<\/bash-stdout>/gi, '')
+    .replace(/<bash-stderr>[\s\S]*?<\/bash-stderr>/gi, '')
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/gi, '')
+    .replace(/<local-command-stderr>[\s\S]*?<\/local-command-stderr>/gi, '')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '')
+    .trim();
+  if (stripped.length === 0) return true;
+  // Pure slash command (e.g. "/compact", "/clear") — built-ins, not skill work.
+  if (/^\/[a-z][\w:-]*\s*$/i.test(stripped)) return true;
+  return false;
 }
 
 export function normalize(s: string): string {
