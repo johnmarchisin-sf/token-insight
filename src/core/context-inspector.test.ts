@@ -90,3 +90,24 @@ test('returns empty for content with no matching headings', () => {
   const md = '# Title\n## Setup\nfoo\n## Architecture\nbar';
   assert.deepEqual(extractDecayingSections(md, FILE), []);
 });
+
+test('section bounded by shallower heading', () => {
+  const md = [
+    '## Preamble',
+    '### Status',          // line 2 — matched, deeper level
+    'body',                // line 3
+    '## Other',            // line 4 — shallower than ###, closes the section
+  ].join('\n');
+  const sections = extractDecayingSections(md, FILE);
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].heading, 'Status');
+  assert.equal(sections[0].startLine, 2);
+  assert.equal(sections[0].endLine, 3);
+});
+
+test('matches "Last updated: DATE" heading', () => {
+  const md = '# Title\n## Last updated: 2026-05-04\n- some content';
+  const sections = extractDecayingSections(md, FILE);
+  assert.equal(sections.length, 1);
+  assert.equal(sections[0].heading, 'Last updated: 2026-05-04');
+});
