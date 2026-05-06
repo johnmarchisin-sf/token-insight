@@ -278,6 +278,67 @@ function contextRecs(reports: ContextReport[], global: GlobalContextReport): Rec
         evidence: { workspace: r.workspaceName, bulky: r.bulkyImports },
       });
     }
+
+    // Decaying-state sections — concrete "move this to STATUS.md" recs.
+    for (const sec of r.decayingSections) {
+      out.push({
+        kind: 'context',
+        severity: sec.lineCount > 40 ? 'medium' : 'low',
+        title:
+          `${r.workspaceName}: '${sec.heading}' section in CLAUDE.md ` +
+          `(lines ${sec.startLine}-${sec.endLine}, ~${formatTokens(sec.estimatedTokens)} tok)`,
+        body:
+          `This section reads like decaying state — content that goes stale between edits and ` +
+          `pays a token tax on every prompt in this workspace. Move it to docs/STATUS.md ` +
+          `(or another canonical living doc) and reference from CLAUDE.md if needed.`,
+        action: `Move lines ${sec.startLine}-${sec.endLine} of ${sec.fromFile} into docs/STATUS.md`,
+        evidence: {
+          workspace: r.workspaceName,
+          file: sec.fromFile,
+          heading: sec.heading,
+          lines: [sec.startLine, sec.endLine],
+          tokens: sec.estimatedTokens,
+        },
+      });
+    }
+
+    // Drifting CLAUDE.md — old AND active workspace.
+    if (r.isDrifting && r.daysSinceModified !== undefined) {
+      out.push({
+        kind: 'context',
+        severity: 'medium',
+        title:
+          `${r.workspaceName}: CLAUDE.md is ${r.daysSinceModified} days old; ` +
+          `${r.recentSessionCount} sessions since`,
+        body:
+          `You've had ${r.recentSessionCount} session(s) in this workspace since the last ` +
+          `CLAUDE.md edit ${r.daysSinceModified} days ago. Doc has likely drifted from what ` +
+          `you're actually doing — quick read-and-update pass recommended.`,
+        evidence: {
+          workspace: r.workspaceName,
+          daysSinceModified: r.daysSinceModified,
+          recentSessionCount: r.recentSessionCount,
+        },
+      });
+    }
+
+    // Stale CLAUDE.md — old, but no recent activity (drift takes precedence).
+    if (r.isStale && r.daysSinceModified !== undefined) {
+      out.push({
+        kind: 'context',
+        severity: 'low',
+        title: `${r.workspaceName}: CLAUDE.md not edited in ${r.daysSinceModified} days`,
+        body:
+          `Workspace CLAUDE.md hasn't been touched in ${r.daysSinceModified} days. Could be ` +
+          `fine if the workspace is dormant; review whether anything in it is now wrong or ` +
+          `out of date.`,
+        evidence: {
+          workspace: r.workspaceName,
+          daysSinceModified: r.daysSinceModified,
+          recentSessionCount: r.recentSessionCount,
+        },
+      });
+    }
   }
   return out;
 }
