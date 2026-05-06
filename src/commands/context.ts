@@ -41,17 +41,43 @@ export async function runContext(opts: ContextOpts): Promise<void> {
         workspace: r.workspaceName,
         lines: String(r.files.reduce((s, f) => s + f.lines, 0)),
         tokens: fmtTokens(r.totalEstimatedTokens),
+        age: r.daysSinceModified === undefined ? '?' : `${r.daysSinceModified}d`,
+        state: r.isDrifting ? 'drifting' : r.isStale ? 'stale' : 'fresh',
+        decay: String(r.decayingSections.length),
         missing: String(r.missingImports.length),
         bulky: String(r.bulkyImports.length),
       })),
-      ['workspace', 'lines', 'tokens', 'missing', 'bulky']
+      ['workspace', 'lines', 'tokens', 'age', 'state', 'decay', 'missing', 'bulky']
     )
   );
 
   for (const r of reports) {
-    if (r.missingImports.length === 0 && r.bulkyImports.length === 0) continue;
+    const hasFindings =
+      r.decayingSections.length > 0 ||
+      r.missingImports.length > 0 ||
+      r.bulkyImports.length > 0 ||
+      r.isStale ||
+      r.isDrifting;
+    if (!hasFindings) continue;
     console.log();
-    console.log(bold(`Issues in ${r.workspaceName}`));
+    console.log(bold(`Findings in ${r.workspaceName}`));
+    if (r.isDrifting && r.daysSinceModified !== undefined) {
+      console.log(
+        warn(`  ⚠ Drifting:`) +
+          ` ${r.daysSinceModified} days since last edit, ${r.recentSessionCount} sessions since`
+      );
+    } else if (r.isStale && r.daysSinceModified !== undefined) {
+      console.log(dim(`  • Stale: ${r.daysSinceModified} days since last edit`));
+    }
+    if (r.decayingSections.length > 0) {
+      console.log(dim('  Decaying-state sections (move to docs/STATUS.md):'));
+      for (const sec of r.decayingSections) {
+        console.log(
+          `    • '${sec.heading}'  lines ${sec.startLine}-${sec.endLine}  ` +
+            `~${fmtTokens(sec.estimatedTokens)} tokens`
+        );
+      }
+    }
     if (r.missingImports.length > 0) {
       console.log(dim('  Missing references:'));
       for (const m of r.missingImports) {
