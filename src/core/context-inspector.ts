@@ -73,7 +73,12 @@ const DECAYING_HEADING_PATTERNS: RegExp[] = [
   /^#{2,}\s+(recent\s+\w+|current\s+\w+|next\s+steps?|in\s+progress|todo|last\s+updated|status|activity|recent\s+activity|known\s+issues|quick\s+wins|future\s+work)\b/i,
 ];
 
-const CONTEXT_NAMES = ['CLAUDE.md', 'CLAUDE.local.md'];
+const CONTEXT_NAMES = [
+  'CLAUDE.md',
+  'CLAUDE.local.md',
+  '.claude/CLAUDE.md',
+  '.claude/CLAUDE.local.md',
+];
 const TOKEN_PER_BYTE_ESTIMATE = 0.25; // rough; English text ≈ 4 bytes/token
 
 /** Inspect a single workspace's CLAUDE.md(s). */
