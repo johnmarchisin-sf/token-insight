@@ -12,6 +12,7 @@
     "dev:dashboard": "tsx src/cli.ts dashboard",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/core/*.test.ts",
     "clean": "rm -rf dist"
   },
   "engines": {
