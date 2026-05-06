@@ -555,3 +555,65 @@ footer {
   white-space: pre;
   overflow-x: auto;
 }
+
+/* Context health cards */
+.context-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  background: var(--bg-elev);
+}
+.context-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.context-ws {
+  font-weight: 600;
+  font-size: 14px;
+}
+.context-meta {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.badge.fresh { color: var(--text-dim); background: transparent; border: 1px solid var(--border); }
+.badge.stale { color: var(--text-dim); background: var(--bg); border: 1px solid var(--border); }
+.badge.drifting { color: var(--warn); background: transparent; border: 1px solid var(--warn); }
+.findings {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.findings li {
+  font-size: 13px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.findings li:first-child {
+  border-top: none;
+}
+.finding-action {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  margin-left: 8px;
+}
+.no-findings {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0;
+}

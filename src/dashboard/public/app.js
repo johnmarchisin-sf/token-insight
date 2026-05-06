@@ -62,7 +62,7 @@ function render(d) {
   renderModelTable(d.byModel);
   renderWasteTable(d.waste);
   renderClusters(d.clusters, d.denylist || []);
-  renderContextTable(d.contextReports || []);
+  renderContextCards(d.contextReports || []);
   renderFileReadsTable(d.fileReads || []);
 }
 
@@ -255,28 +255,112 @@ async function copyToClipboard(btn) {
   }
 }
 
-function renderContextTable(reports) {
+function renderContextCards(reports) {
+  const container = $('context-cards');
   if (!reports.length) {
-    $('table-context').innerHTML = '<tr><td>No CLAUDE.md files found in your workspaces yet.</td></tr>';
+    container.innerHTML =
+      '<p style="color:var(--text-dim);margin:0">No CLAUDE.md files found in your workspaces yet.</p>';
     return;
   }
-  const rows = reports.slice(0, 12).map((r) => ({
-    workspace: r.workspaceName,
-    lines: String(r.files.reduce((s, f) => s + f.lines, 0)),
-    tokens: fmtTokens(r.totalEstimatedTokens),
-    issues: String(r.missingImports.length + r.bulkyImports.length),
-  }));
-  const headers = ['workspace', 'lines', 'tokens', 'issues'];
-  let html = '<thead><tr>' + headers.map((h) => `<th${h !== 'workspace' ? ' class="num"' : ''}>${h}</th>`).join('') + '</tr></thead><tbody>';
-  for (const r of rows) {
-    html +=
-      '<tr>' +
-      headers
-        .map((h) => `<td${h !== 'workspace' ? ' class="num"' : ''}>${escapeHtml(r[h])}</td>`)
-        .join('') +
-      '</tr>';
+
+  // Sort: most findings first, then biggest tokens.
+  const findingCount = (r) =>
+    (r.decayingSections?.length || 0) +
+    (r.missingImports?.length || 0) +
+    (r.bulkyImports?.length || 0) +
+    (r.isDrifting ? 1 : 0) +
+    (r.isStale ? 1 : 0);
+  const sorted = [...reports].sort((a, b) => {
+    const fc = findingCount(b) - findingCount(a);
+    if (fc !== 0) return fc;
+    return (b.totalEstimatedTokens || 0) - (a.totalEstimatedTokens || 0);
+  });
+
+  container.innerHTML = sorted.map(contextCardHtml).join('');
+}
+
+function contextCardHtml(r) {
+  const lines = (r.files || []).reduce((s, f) => s + (f.lines || 0), 0);
+  const ageLabel =
+    r.daysSinceModified === undefined || r.daysSinceModified === null
+      ? 'mtime unknown'
+      : r.daysSinceModified === 0
+      ? 'edited today'
+      : `edited ${r.daysSinceModified}d ago`;
+  const badge = r.isDrifting
+    ? '<span class="badge drifting">drifting</span>'
+    : r.isStale
+    ? '<span class="badge stale">stale</span>'
+    : '<span class="badge fresh">fresh</span>';
+  const meta = [
+    `${lines} lines`,
+    `~${fmtTokens(r.totalEstimatedTokens || 0)} tok`,
+    ageLabel,
+  ].join(' · ');
+
+  const findings = [];
+
+  if (r.isDrifting && r.daysSinceModified != null) {
+    findings.push(
+      `<li><strong>Drifting</strong> — ${r.recentSessionCount} session(s) in this workspace since the last edit ${r.daysSinceModified}d ago` +
+        `<div class="finding-action">→ quick read-and-update pass recommended</div></li>`
+    );
+  } else if (r.isStale && r.daysSinceModified != null) {
+    findings.push(
+      `<li><strong>Stale</strong> — not edited in ${r.daysSinceModified} days` +
+        `<div class="finding-action">→ review for outdated content if the workspace is still active</div></li>`
+    );
   }
-  $('table-context').innerHTML = html + '</tbody>';
+
+  for (const sec of r.decayingSections || []) {
+    findings.push(
+      `<li>'<strong>${escapeHtml(sec.heading)}</strong>' lines ${sec.startLine}–${sec.endLine} ` +
+        `(~${fmtTokens(sec.estimatedTokens)} tok)` +
+        `<div class="finding-action">→ move to docs/STATUS.md</div></li>`
+    );
+  }
+
+  if ((r.missingImports || []).length > 0) {
+    const sample = r.missingImports
+      .slice(0, 3)
+      .map((m) => escapeHtml(m.reference))
+      .join(', ');
+    const more =
+      r.missingImports.length > 3 ? ` <span class="hint">and ${r.missingImports.length - 3} more</span>` : '';
+    findings.push(
+      `<li><strong>${r.missingImports.length} stale @-import(s)</strong>: ${sample}${more}` +
+        `<div class="finding-action">→ remove or fix the references</div></li>`
+    );
+  }
+
+  if ((r.bulkyImports || []).length > 0) {
+    const sample = r.bulkyImports
+      .slice(0, 3)
+      .map((b) => `${escapeHtml(b.reference)} (~${fmtTokens(b.estimatedTokens)} tok)`)
+      .join(', ');
+    const more =
+      r.bulkyImports.length > 3 ? ` <span class="hint">and ${r.bulkyImports.length - 3} more</span>` : '';
+    findings.push(
+      `<li><strong>${r.bulkyImports.length} large @-import(s)</strong>: ${sample}${more}` +
+        `<div class="finding-action">→ consider summarizing or loading on demand</div></li>`
+    );
+  }
+
+  const findingsBlock =
+    findings.length > 0
+      ? `<ul class="findings">${findings.join('')}</ul>`
+      : '<p class="no-findings">✓ No issues</p>';
+
+  return (
+    `<div class="context-card">` +
+    `<div class="context-card-header">` +
+    `<span class="context-ws">${escapeHtml(r.workspaceName)}</span>` +
+    `<span class="context-meta">${meta}</span>` +
+    badge +
+    `</div>` +
+    findingsBlock +
+    `</div>`
+  );
 }
 
 function renderFileReadsTable(reads) {
