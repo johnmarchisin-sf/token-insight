@@ -111,3 +111,50 @@ test('matches "Last updated: DATE" heading', () => {
   assert.equal(sections.length, 1);
   assert.equal(sections[0].heading, 'Last updated: 2026-05-04');
 });
+
+import { computeStaleness } from './context-inspector.js';
+
+test('computeStaleness: drifting when old + active', () => {
+  const r = computeStaleness({
+    daysSinceModified: 45,
+    recentSessionCount: 7,
+  });
+  assert.equal(r.isStale, false, 'drifting takes precedence over stale');
+  assert.equal(r.isDrifting, true);
+});
+
+test('computeStaleness: stale when very old, regardless of activity', () => {
+  const r = computeStaleness({
+    daysSinceModified: 90,
+    recentSessionCount: 0,
+  });
+  assert.equal(r.isStale, true);
+  assert.equal(r.isDrifting, false);
+});
+
+test('computeStaleness: drifting beats stale at 90 days + active', () => {
+  const r = computeStaleness({
+    daysSinceModified: 90,
+    recentSessionCount: 12,
+  });
+  assert.equal(r.isStale, false);
+  assert.equal(r.isDrifting, true);
+});
+
+test('computeStaleness: neither when fresh', () => {
+  const r = computeStaleness({ daysSinceModified: 5, recentSessionCount: 20 });
+  assert.equal(r.isStale, false);
+  assert.equal(r.isDrifting, false);
+});
+
+test('computeStaleness: neither when daysSinceModified undefined', () => {
+  const r = computeStaleness({ daysSinceModified: undefined, recentSessionCount: 20 });
+  assert.equal(r.isStale, false);
+  assert.equal(r.isDrifting, false);
+});
+
+test('computeStaleness: not drifting when old but few sessions', () => {
+  const r = computeStaleness({ daysSinceModified: 35, recentSessionCount: 2 });
+  assert.equal(r.isDrifting, false);
+  assert.equal(r.isStale, false);
+});

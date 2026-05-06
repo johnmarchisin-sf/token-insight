@@ -77,18 +77,23 @@ const CONTEXT_NAMES = ['CLAUDE.md', 'CLAUDE.local.md'];
 const TOKEN_PER_BYTE_ESTIMATE = 0.25; // rough; English text ≈ 4 bytes/token
 
 /** Inspect a single workspace's CLAUDE.md(s). */
-export async function inspectWorkspace(workspacePath: string, workspaceName: string): Promise<ContextReport | null> {
+export async function inspectWorkspace(
+  workspacePath: string,
+  workspaceName: string,
+  workspaceSessions: Session[] = [],
+): Promise<ContextReport | null> {
   const files: ContextFile[] = [];
   const missingImports: MissingImport[] = [];
   const bulkyImports: BulkyImport[] = [];
+  const decayingSections: DecayingSection[] = [];
 
   for (const name of CONTEXT_NAMES) {
     const fp = path.join(workspacePath, name);
     const f = await statContextFile(fp);
     if (f.exists) {
       files.push(f);
-      // Parse @-mentions / file references.
       const content = await safeRead(fp);
+      decayingSections.push(...extractDecayingSections(content, fp));
       const refs = extractFileReferences(content);
       for (const ref of refs) {
         const resolved = resolveReference(workspacePath, ref);
@@ -116,6 +121,22 @@ export async function inspectWorkspace(workspacePath: string, workspaceName: str
   if (files.length === 0 && missingImports.length === 0) return null;
 
   const totalEstimatedTokens = files.reduce((s, f) => s + f.estimatedTokens, 0);
+
+  // Newest mtime across CLAUDE.md and CLAUDE.local.md.
+  const mtimes = files
+    .map((f) => f.lastModified)
+    .filter((d): d is Date => d instanceof Date);
+  const newestMtime = mtimes.length > 0
+    ? new Date(Math.max(...mtimes.map((d) => d.getTime())))
+    : undefined;
+  const daysSinceModified = newestMtime
+    ? Math.floor((Date.now() - newestMtime.getTime()) / 86_400_000)
+    : undefined;
+  const recentSessionCount = newestMtime
+    ? workspaceSessions.filter((s) => s.endedAt > newestMtime).length
+    : 0;
+  const { isStale, isDrifting } = computeStaleness({ daysSinceModified, recentSessionCount });
+
   return {
     workspacePath,
     workspaceName,
@@ -123,11 +144,11 @@ export async function inspectWorkspace(workspacePath: string, workspaceName: str
     totalEstimatedTokens,
     missingImports,
     bulkyImports,
-    decayingSections: [],
-    daysSinceModified: undefined,
-    recentSessionCount: 0,
-    isStale: false,
-    isDrifting: false,
+    decayingSections,
+    daysSinceModified,
+    recentSessionCount,
+    isStale,
+    isDrifting,
   };
 }
 
@@ -143,13 +164,21 @@ export async function inspectGlobal(): Promise<GlobalContextReport> {
   };
 }
 
-/** Inspect every workspace seen in the loaded sessions, deduped. */
 export async function inspectAllWorkspaces(sessions: Session[]): Promise<ContextReport[]> {
   const seen = new Map<string, string>(); // path -> name
   for (const s of sessions) seen.set(s.workspacePath, s.workspaceName);
+
+  // Group sessions by workspacePath so we can pass each workspace's sessions in.
+  const byPath = new Map<string, Session[]>();
+  for (const s of sessions) {
+    const arr = byPath.get(s.workspacePath) ?? [];
+    arr.push(s);
+    byPath.set(s.workspacePath, arr);
+  }
+
   const out: ContextReport[] = [];
   for (const [p, n] of seen) {
-    const r = await inspectWorkspace(p, n);
+    const r = await inspectWorkspace(p, n, byPath.get(p) ?? []);
     if (r) out.push(r);
   }
   return out.sort((a, b) => b.totalEstimatedTokens - a.totalEstimatedTokens);
@@ -257,4 +286,16 @@ export function extractDecayingSections(content: string, fromFile: string): Deca
     });
   }
   return out;
+}
+
+export function computeStaleness(input: {
+  daysSinceModified: number | undefined;
+  recentSessionCount: number;
+}): { isStale: boolean; isDrifting: boolean } {
+  const { daysSinceModified, recentSessionCount } = input;
+  if (daysSinceModified === undefined) return { isStale: false, isDrifting: false };
+  const isDrifting = daysSinceModified > DRIFT_DAYS && recentSessionCount >= DRIFT_SESSIONS;
+  // Drifting subsumes stale — don't double-count.
+  const isStale = !isDrifting && daysSinceModified > STALE_DAYS;
+  return { isStale, isDrifting };
 }
