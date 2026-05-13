@@ -35,6 +35,7 @@ export function workspaceNameFromPath(p: string): string {
  * Adjust KNOWN_BUCKETS to taste.
  */
 const KNOWN_BUCKETS = ['conductor', 'projects', 'work', 'code', 'src'];
+const CONDUCTOR_SUBBUCKETS = ['workspaces', 'production', 'sandbox'];
 
 export function groupForWorkspace(workspacePath: string): string {
   const home = homedir();
@@ -58,6 +59,15 @@ export function rollupNameForPath(workspacePath: string): string {
   if (workspacePath.startsWith(home + '/')) {
     const rel = workspacePath.slice(home.length + 1);
     const parts = rel.split('/').filter(Boolean);
+    // Conductor convention: ~/conductor/<sub-bucket>/<project>/<workspace>/...
+    // Use the project segment, not the sub-bucket.
+    if (
+      parts.length >= 3 &&
+      parts[0] === 'conductor' &&
+      CONDUCTOR_SUBBUCKETS.includes(parts[1])
+    ) {
+      return parts[2];
+    }
     if (parts.length >= 2 && KNOWN_BUCKETS.includes(parts[0])) {
       return parts[1];
     }

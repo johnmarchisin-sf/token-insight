@@ -61,8 +61,8 @@ function render(d) {
   renderWorkspaceTable(d.byWorkspace);
   renderModelTable(d.byModel);
   renderWasteTable(d.waste);
-  renderClusters(d.clusters);
-  renderContextTable(d.contextReports || []);
+  renderClusters(d.clusters, d.denylist || []);
+  renderContextCards(d.contextReports || []);
   renderFileReadsTable(d.fileReads || []);
 }
 
@@ -74,45 +74,293 @@ function renderRecommendations(recs) {
   }
   container.innerHTML = recs
     .slice(0, 12)
-    .map(
-      (r) => `
-      <div class="rec ${r.severity}">
-        <div class="severity">${r.severity}</div>
-        <div class="body">
-          <div class="title">${escapeHtml(r.title)}<span class="kind">${escapeHtml(r.kind)}</span></div>
-          <div class="desc">${escapeHtml(r.body)}</div>
-          ${r.action ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
-        </div>
-      </div>`
-    )
+    .map((r) => recCardHtml(r))
     .join('');
   if (recs.length > 12) {
     container.innerHTML += `<p style="color:var(--text-dim);font-size:12px;margin-top:8px">${recs.length - 12} more — run <code>ti recommend</code> for the full list.</p>`;
   }
+  wireRecCardEvents();
 }
 
-function renderContextTable(reports) {
+function recCardHtml(r) {
+  const cid = r.evidence && r.evidence.clusterId ? String(r.evidence.clusterId) : '';
+  const isSkill = r.kind === 'skill' && cid;
+  const matched = isSkill && r.evidence && r.evidence.matchedSkill ? r.evidence.matchedSkill : null;
+  const rep = isSkill ? truncate(r.evidence.representative || '', 320) : '';
+  const ws = isSkill && Array.isArray(r.evidence.workspaces) ? r.evidence.workspaces : [];
+  const ev = r.evidence || {};
+
+  // Compact stats line — only show fields the rec actually has.
+  const stats = [];
+  if (isSkill && typeof ev.size === 'number') stats.push(`${ev.size}×`);
+  if (isSkill && typeof ev.totalTokens === 'number') stats.push(`${fmtTokens(ev.totalTokens)} tok`);
+  if (isSkill && ws.length) stats.push(`${ws.length} workspace${ws.length === 1 ? '' : 's'}`);
+  const statsLine = stats.length ? `<span class="rec-stats">${stats.join(' · ')}</span>` : '';
+
+  const inlineRep = isSkill
+    ? `<div class="rec-cluster-rep">"${escapeHtml(rep)}"</div>
+       ${ws.length ? `<div class="rec-workspaces">workspaces: ${escapeHtml(ws.join(', '))}</div>` : ''}`
+    : '';
+  const matchedBlock = matched
+    ? `<div class="matched-skill">
+         <div class="matched-skill-head">matched skill: <strong>${escapeHtml(matched.label)}</strong> <span class="matched-skill-source">(${escapeHtml(matched.source)})</span></div>
+         <code class="matched-skill-path">${escapeHtml(matched.skillPath)}</code>
+       </div>`
+    : '';
+  const hookSnippet = ev.hookSnippet ? String(ev.hookSnippet) : '';
+  const hookId = `hook-${cid || Math.random().toString(36).slice(2, 8)}`;
+  const hookBlock = hookSnippet
+    ? `<div class="hook-snippet">
+         <div class="hook-snippet-head">
+           <span>settings.json snippet</span>
+           <button class="copy-btn" data-target="${hookId}">📋 Copy</button>
+         </div>
+         <pre id="${hookId}">${escapeHtml(hookSnippet)}</pre>
+       </div>`
+    : '';
+  const actions = isSkill
+    ? matched
+      ? `<div class="rec-actions">
+           <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — irrelevant match">👎 Hide</button>
+         </div>`
+      : `<div class="rec-actions">
+           <button class="btn-hide" data-cid="${escapeHtml(cid)}" title="Hide — one-off, don't suggest again">👎 Hide</button>
+           <button class="btn-draft" data-cid="${escapeHtml(cid)}" title="Open the SKILL.md scaffold">👍 Draft skill</button>
+         </div>
+         <details class="scaffold-panel" data-cid="${escapeHtml(cid)}" data-loaded="0">
+           <summary class="scaffold-summary">Skill scaffold</summary>
+           <div class="scaffold-body"><p class="scaffold-loading">Loading scaffold…</p></div>
+         </details>`
+    : '';
+  // Auto-expand high-severity recs so the worst ones aren't hidden behind a click.
+  const openAttr = r.severity === 'high' ? ' open' : '';
+  return `
+    <details class="rec ${r.severity}"${openAttr}${cid ? ` data-cid="${escapeHtml(cid)}"` : ''}>
+      <summary class="rec-summary">
+        <span class="severity">${r.severity}</span>
+        <span class="rec-title">${escapeHtml(r.title)}</span>
+        ${statsLine}
+        <span class="kind">${escapeHtml(r.kind)}</span>
+      </summary>
+      <div class="rec-details">
+        <div class="desc">${escapeHtml(r.body)}</div>
+        ${inlineRep}
+        ${matchedBlock}
+        ${hookBlock}
+        ${r.action && !isSkill ? `<div class="action">${escapeHtml(r.action)}</div>` : ''}
+        ${actions}
+      </div>
+    </details>`;
+}
+
+function wireRecCardEvents() {
+  const scope = document.getElementById('recs-list');
+  if (!scope) return;
+  for (const btn of scope.querySelectorAll('.btn-hide')) {
+    btn.addEventListener('click', () => denyCluster(btn.dataset.cid, 'denied'));
+  }
+  for (const btn of scope.querySelectorAll('.btn-draft')) {
+    btn.addEventListener('click', () => {
+      const cid = btn.dataset.cid;
+      const panel = scope.querySelector(`details.scaffold-panel[data-cid="${cid}"]`);
+      if (panel) panel.open = true;
+    });
+  }
+  for (const panel of scope.querySelectorAll('details.scaffold-panel')) {
+    panel.addEventListener('toggle', () => {
+      if (!panel.open) return;
+      if (panel.dataset.loaded === '1') return;
+      panel.dataset.loaded = '1';
+      loadScaffold(panel.dataset.cid, panel);
+    });
+  }
+  for (const btn of scope.querySelectorAll('.hook-snippet .copy-btn')) {
+    btn.addEventListener('click', () => copyToClipboard(btn));
+  }
+}
+
+async function denyCluster(cid, reason) {
+  if (!cid) return;
+  const card = document.querySelector(`.rec[data-cid="${cid}"]`);
+  if (card) card.style.opacity = '0.4';
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (card) card.remove();
+    load();
+  } catch (err) {
+    if (card) card.style.opacity = '1';
+    alert('Failed to hide: ' + err.message);
+  }
+}
+
+async function unhideCluster(cid) {
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/deny`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    load();
+  } catch (err) {
+    alert('Failed to unhide: ' + err.message);
+  }
+}
+
+async function loadScaffold(cid, panel) {
+  const body = panel.querySelector('.scaffold-body');
+  try {
+    const res = await fetch(`/api/cluster/${encodeURIComponent(cid)}/scaffold`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+    body.innerHTML = `
+      <div class="scaffold-block">
+        <div class="scaffold-block-head">
+          <span>SKILL.md (${escapeHtml(s.slug)}-SKILL.md)</span>
+          <button class="copy-btn" data-target="skill-${escapeHtml(cid)}">📋 Copy</button>
+        </div>
+        <pre id="skill-${escapeHtml(cid)}">${escapeHtml(s.skillBody)}</pre>
+      </div>
+      <div class="scaffold-block">
+        <div class="scaffold-block-head">
+          <span>Polish prompt</span>
+          <button class="copy-btn" data-target="polish-${escapeHtml(cid)}">📋 Copy</button>
+        </div>
+        <pre id="polish-${escapeHtml(cid)}">${escapeHtml(s.polishPrompt)}</pre>
+      </div>
+      <button class="mark-created-btn" data-cid="${escapeHtml(cid)}">✓ Mark as created — hide from future runs</button>`;
+    for (const cb of body.querySelectorAll('.copy-btn')) {
+      cb.addEventListener('click', () => copyToClipboard(cb));
+    }
+    const mark = body.querySelector('.mark-created-btn');
+    if (mark) mark.addEventListener('click', () => denyCluster(cid, 'created'));
+  } catch (err) {
+    body.innerHTML = `<p style="color:var(--danger)">Failed to load scaffold: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function copyToClipboard(btn) {
+  const target = document.getElementById(btn.dataset.target);
+  if (!target) return;
+  try {
+    await navigator.clipboard.writeText(target.textContent || '');
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = original; }, 1200);
+  } catch (err) {
+    alert('Copy failed: ' + err.message);
+  }
+}
+
+function renderContextCards(reports) {
+  const container = $('context-cards');
   if (!reports.length) {
-    $('table-context').innerHTML = '<tr><td>No CLAUDE.md files found in your workspaces yet.</td></tr>';
+    container.innerHTML =
+      '<p style="color:var(--text-dim);margin:0">No CLAUDE.md files found in your workspaces yet.</p>';
     return;
   }
-  const rows = reports.slice(0, 12).map((r) => ({
-    workspace: r.workspaceName,
-    lines: String(r.files.reduce((s, f) => s + f.lines, 0)),
-    tokens: fmtTokens(r.totalEstimatedTokens),
-    issues: String(r.missingImports.length + r.bulkyImports.length),
-  }));
-  const headers = ['workspace', 'lines', 'tokens', 'issues'];
-  let html = '<thead><tr>' + headers.map((h) => `<th${h !== 'workspace' ? ' class="num"' : ''}>${h}</th>`).join('') + '</tr></thead><tbody>';
-  for (const r of rows) {
-    html +=
-      '<tr>' +
-      headers
-        .map((h) => `<td${h !== 'workspace' ? ' class="num"' : ''}>${escapeHtml(r[h])}</td>`)
-        .join('') +
-      '</tr>';
+
+  // Sort: most findings first, then biggest tokens.
+  const findingCount = (r) =>
+    (r.decayingSections?.length || 0) +
+    (r.missingImports?.length || 0) +
+    (r.bulkyImports?.length || 0) +
+    (r.isDrifting ? 1 : 0) +
+    (r.isStale ? 1 : 0);
+  const sorted = [...reports].sort((a, b) => {
+    const fc = findingCount(b) - findingCount(a);
+    if (fc !== 0) return fc;
+    return (b.totalEstimatedTokens || 0) - (a.totalEstimatedTokens || 0);
+  });
+
+  container.innerHTML = sorted.map(contextCardHtml).join('');
+}
+
+function contextCardHtml(r) {
+  const lines = (r.files || []).reduce((s, f) => s + (f.lines || 0), 0);
+  const ageLabel =
+    r.daysSinceModified === undefined || r.daysSinceModified === null
+      ? 'mtime unknown'
+      : r.daysSinceModified === 0
+      ? 'edited today'
+      : `edited ${r.daysSinceModified}d ago`;
+  const badge = r.isDrifting
+    ? '<span class="badge drifting">drifting</span>'
+    : r.isStale
+    ? '<span class="badge stale">stale</span>'
+    : '<span class="badge fresh">fresh</span>';
+  const meta = [
+    `${lines} lines`,
+    `~${fmtTokens(r.totalEstimatedTokens || 0)} tok`,
+    ageLabel,
+  ].join(' · ');
+
+  const findings = [];
+
+  if (r.isDrifting && r.daysSinceModified != null) {
+    findings.push(
+      `<li><strong>Drifting</strong> — ${r.recentSessionCount} session(s) in this workspace since the last edit ${r.daysSinceModified}d ago` +
+        `<div class="finding-action">→ quick read-and-update pass recommended</div></li>`
+    );
+  } else if (r.isStale && r.daysSinceModified != null) {
+    findings.push(
+      `<li><strong>Stale</strong> — not edited in ${r.daysSinceModified} days` +
+        `<div class="finding-action">→ review for outdated content if the workspace is still active</div></li>`
+    );
   }
-  $('table-context').innerHTML = html + '</tbody>';
+
+  for (const sec of r.decayingSections || []) {
+    findings.push(
+      `<li>'<strong>${escapeHtml(sec.heading)}</strong>' lines ${sec.startLine}–${sec.endLine} ` +
+        `(~${fmtTokens(sec.estimatedTokens)} tok)` +
+        `<div class="finding-action">→ move to docs/STATUS.md</div></li>`
+    );
+  }
+
+  if ((r.missingImports || []).length > 0) {
+    const sample = r.missingImports
+      .slice(0, 3)
+      .map((m) => escapeHtml(m.reference))
+      .join(', ');
+    const more =
+      r.missingImports.length > 3 ? ` <span class="hint">and ${r.missingImports.length - 3} more</span>` : '';
+    findings.push(
+      `<li><strong>${r.missingImports.length} stale @-import(s)</strong>: ${sample}${more}` +
+        `<div class="finding-action">→ remove or fix the references</div></li>`
+    );
+  }
+
+  if ((r.bulkyImports || []).length > 0) {
+    const sample = r.bulkyImports
+      .slice(0, 3)
+      .map((b) => `${escapeHtml(b.reference)} (~${fmtTokens(b.estimatedTokens)} tok)`)
+      .join(', ');
+    const more =
+      r.bulkyImports.length > 3 ? ` <span class="hint">and ${r.bulkyImports.length - 3} more</span>` : '';
+    findings.push(
+      `<li><strong>${r.bulkyImports.length} large @-import(s)</strong>: ${sample}${more}` +
+        `<div class="finding-action">→ consider summarizing or loading on demand</div></li>`
+    );
+  }
+
+  const findingsBlock =
+    findings.length > 0
+      ? `<ul class="findings">${findings.join('')}</ul>`
+      : '<p class="no-findings">✓ No issues</p>';
+
+  return (
+    `<div class="context-card">` +
+    `<div class="context-card-header">` +
+    `<span class="context-ws">${escapeHtml(r.workspaceName)}</span>` +
+    `<span class="context-meta">${meta}</span>` +
+    badge +
+    `</div>` +
+    findingsBlock +
+    `</div>`
+  );
 }
 
 function renderFileReadsTable(reads) {
@@ -193,8 +441,13 @@ function renderActive(d) {
     warn.classList.add('hidden');
   }
 
-  $('active-workspaces').textContent =
-    'workspaces this window: ' + (a.workspaces?.length ? a.workspaces.join(', ') : '(none)');
+  const fmtClock = (d) =>
+    new Date(d).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const range = `${fmtClock(a.startedAt)} – ${fmtClock(a.endsAt)}`;
+  const wsList = a.workspaces?.length ? a.workspaces.join(', ') : null;
+  $('active-workspaces').textContent = wsList
+    ? `window: ${range} · workspaces: ${wsList}`
+    : `window: ${range}`;
 }
 
 function renderBlocksChart(blocks, peak) {
@@ -205,26 +458,48 @@ function renderBlocksChart(blocks, peak) {
       ' ' +
       d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   });
-  const colors = ordered.map((b) => (b.isActive ? '#3fb950' : '#58a6ff'));
+  const values = ordered.map((b) => b.totalTokens);
+  const pointRadii = ordered.map((b) => (b.isActive ? 6 : 3));
+  const pointColors = ordered.map((b) => (b.isActive ? '#3fb950' : '#58a6ff'));
+  const peakLine = peak ? ordered.map(() => peak) : null;
+
+  const datasets = [
+    {
+      label: 'Tokens per 5h window',
+      data: values,
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88, 166, 255, 0.18)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: pointRadii,
+      pointBackgroundColor: pointColors,
+      pointBorderColor: pointColors,
+      borderWidth: 2,
+    },
+  ];
+  if (peakLine) {
+    datasets.push({
+      label: 'recent peak',
+      data: peakLine,
+      borderColor: '#8b949e',
+      borderDash: [5, 5],
+      borderWidth: 1,
+      pointRadius: 0,
+      fill: false,
+    });
+  }
+
   const ctx = $('chart-blocks').getContext('2d');
   if (charts.blocks) charts.blocks.destroy();
   charts.blocks = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Tokens per 5h window',
-          data: ordered.map((b) => b.totalTokens),
-          backgroundColor: colors,
-        },
-      ],
-    },
+    type: 'line',
+    data: { labels, datasets },
     options: {
       ...chartBaseOptions(),
       plugins: {
         legend: { display: false },
         tooltip: {
+          filter: (ctx) => ctx.datasetIndex === 0,
           callbacks: {
             label: (ctx) => fmtTokens(ctx.parsed.y) + ' tokens',
           },
@@ -233,9 +508,9 @@ function renderBlocksChart(blocks, peak) {
       scales: {
         x: { ticks: { color: '#8b949e', maxRotation: 60, minRotation: 30 }, grid: { color: '#1f2630' } },
         y: {
+          beginAtZero: true,
           ticks: { color: '#8b949e', callback: (v) => fmtTokens(v) },
           grid: { color: '#1f2630' },
-          suggestedMax: peak ? peak * 1.1 : undefined,
         },
       },
     },
@@ -393,19 +668,42 @@ function renderModelTable(byModel) {
   );
 }
 
+// Maps a waste-detector reason tag to a one-line action the user can take.
+// Matches the tag's leading keyword so the suffix details (multipliers, %, etc.)
+// don't break the lookup.
+function tipForReason(reason) {
+  if (reason.startsWith('outlier')) return 'Break work into smaller sessions.';
+  if (reason.startsWith('cache-bloated')) return 'Trim CLAUDE.md / @-imports — context overhead is high.';
+  if (reason.startsWith('bloated turns')) return 'Narrow Read ranges; use head_limit on Grep; avoid dumping huge tool outputs.';
+  if (reason.startsWith('long idle gap')) return 'Start a fresh session instead of resuming after a long pause.';
+  return '';
+}
+
 function renderWasteTable(waste) {
   if (!waste || waste.length === 0) {
     $('table-waste').innerHTML = '<tr><td>No flagged sessions yet.</td></tr>';
     return;
   }
-  const rows = waste.slice(0, 25).map((w) => ({
-    workspace: w.workspaceName,
-    when: new Date(w.startedAt).toLocaleString(),
-    tokens: fmtTokens(w.totalTokens),
-    why: w.reasons.map((r) => `<span class="tag warn">${escapeHtml(r)}</span>`).join(' '),
-  }));
-  const headers = ['workspace', 'when', 'tokens', 'why'];
-  let html = '<thead><tr>' + headers.map((h) => `<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+  const rows = waste.slice(0, 25).map((w) => {
+    const tips = w.reasons
+      .map(tipForReason)
+      .filter(Boolean)
+      .map((t) => `<div class="tip">${escapeHtml(t)}</div>`)
+      .join('');
+    return {
+      workspace: escapeHtml(w.workspaceName),
+      when: escapeHtml(new Date(w.startedAt).toLocaleString()),
+      tokens: escapeHtml(fmtTokens(w.totalTokens)),
+      why: w.reasons.map((r) => `<span class="tag warn">${escapeHtml(r)}</span>`).join(' '),
+      todo: tips || '<span class="tip-none">—</span>',
+    };
+  });
+  const headers = ['workspace', 'when', 'tokens', 'why', 'todo'];
+  const headerLabels = { workspace: 'workspace', when: 'when', tokens: 'tokens', why: 'why', todo: 'what to do' };
+  let html =
+    '<thead><tr>' +
+    headers.map((h) => `<th${h === 'tokens' ? ' class="num"' : ''}>${headerLabels[h]}</th>`).join('') +
+    '</tr></thead><tbody>';
   for (const r of rows) {
     html +=
       '<tr>' +
@@ -418,13 +716,31 @@ function renderWasteTable(waste) {
   $('table-waste').innerHTML = html;
 }
 
-function renderClusters(clusters) {
+function renderClusters(clusters, denylist) {
   const container = $('clusters');
+  const hiddenHtml = denylist.length
+    ? `<details class="hidden-clusters">
+         <summary>Hidden (${denylist.length}) — show</summary>
+         <div class="hidden-list">
+           ${denylist.map((e) => `
+             <div class="hidden-entry" data-cid="${escapeHtml(e.id)}">
+               <div class="meta">
+                 <span class="tag">${escapeHtml(e.reason)}</span>
+                 <span class="hidden-id">${escapeHtml(e.id)}</span>
+                 <span class="hidden-date">${escapeHtml(new Date(e.addedAt).toLocaleString())}</span>
+               </div>
+               <div class="hidden-rep">${escapeHtml(truncate(e.repExcerpt, 240))}</div>
+               <button class="btn-unhide" data-cid="${escapeHtml(e.id)}">↺ Unhide</button>
+             </div>`).join('')}
+         </div>
+       </details>`
+    : '';
   if (!clusters || clusters.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim)">No recurring patterns surfaced yet — give it more usage history.</p>';
+    container.innerHTML = hiddenHtml + '<p style="color:var(--text-dim)">No recurring patterns surfaced yet — give it more usage history.</p>';
+    wireUnhideEvents(container);
     return;
   }
-  container.innerHTML = clusters
+  container.innerHTML = hiddenHtml + clusters
     .map(
       (c, i) => `
     <div class="cluster">
@@ -444,6 +760,13 @@ function renderClusters(clusters) {
     </div>`
     )
     .join('');
+  wireUnhideEvents(container);
+}
+
+function wireUnhideEvents(scope) {
+  for (const btn of scope.querySelectorAll('.btn-unhide')) {
+    btn.addEventListener('click', () => unhideCluster(btn.dataset.cid));
+  }
 }
 
 function tableHtml(cols, rows) {

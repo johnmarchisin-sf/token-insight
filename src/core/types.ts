@@ -71,12 +71,20 @@ export interface Session {
 }
 
 export interface PromptCluster {
+  id: string;
   representative: string;
   size: number;
   totalTokens: number;
   totalCost: number;
   workspaces: string[];
   examplePrompts: string[];
+  trigrams: string[];
+  /** Members in the last 7 days (for borderline / trending detection). */
+  recentSize: number;
+  /** Tokens consumed by recent members. */
+  recentTokens: number;
+  /** Distinct session ids that contributed prompts to this cluster. */
+  sessionIds: string[];
 }
 
 export interface WasteFlag {

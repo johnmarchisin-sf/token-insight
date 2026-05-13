@@ -6,6 +6,7 @@
 // surface a noisy cluster the user can eyeball than miss a real pattern.
 
 import { Session, PromptCluster } from './types.js';
+import { clusterIdFor } from './cluster-id.js';
 
 export interface ClusterOptions {
   /** Jaccard similarity above which a prompt joins an existing cluster. */
@@ -33,6 +34,8 @@ interface PromptRecord {
   normalized: string;
   trigrams: Set<string>;
   workspace: string;
+  sessionId: string;
+  timestamp: Date;
   cost: number;
   tokens: number;
 }
@@ -43,7 +46,10 @@ interface ClusterAccum {
   totalCost: number;
   totalTokens: number;
   workspaces: Set<string>;
+  sessionIds: Set<string>;
 }
+
+const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): PromptCluster[] {
   const o = { ...DEFAULTS, ...opts };
@@ -69,6 +75,7 @@ export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): 
       best.totalCost += r.cost;
       best.totalTokens += r.tokens;
       best.workspaces.add(r.workspace);
+      best.sessionIds.add(r.sessionId);
     } else {
       clusters.push({
         rep: r,
@@ -76,22 +83,39 @@ export function clusterPrompts(sessions: Session[], opts: ClusterOptions = {}): 
         totalCost: r.cost,
         totalTokens: r.tokens,
         workspaces: new Set([r.workspace]),
+        sessionIds: new Set([r.sessionId]),
       });
     }
   }
 
+  const cutoff = Date.now() - RECENT_WINDOW_MS;
   return clusters
     .filter((c) => c.members.length >= o.minSize)
     .sort((a, b) => b.totalTokens - a.totalTokens)
     .slice(0, o.topN)
-    .map<PromptCluster>((c) => ({
-      representative: c.rep.text,
-      size: c.members.length,
-      totalTokens: c.totalTokens,
-      totalCost: c.totalCost,
-      workspaces: [...c.workspaces].sort(),
-      examplePrompts: c.members.slice(0, 5).map((m) => m.text),
-    }));
+    .map<PromptCluster>((c) => {
+      let recentSize = 0;
+      let recentTokens = 0;
+      for (const m of c.members) {
+        if (m.timestamp.getTime() >= cutoff) {
+          recentSize += 1;
+          recentTokens += m.tokens;
+        }
+      }
+      return {
+        id: clusterIdFor(c.rep.normalized),
+        representative: c.rep.text,
+        size: c.members.length,
+        totalTokens: c.totalTokens,
+        totalCost: c.totalCost,
+        workspaces: [...c.workspaces].sort(),
+        examplePrompts: c.members.slice(0, 5).map((m) => m.text),
+        trigrams: [...c.rep.trigrams],
+        recentSize,
+        recentTokens,
+        sessionIds: [...c.sessionIds],
+      };
+    });
 }
 
 function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): PromptRecord[] {
@@ -103,6 +127,7 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
       const t = s.turns[i];
       if (t.role !== 'user') continue;
       if (!t.promptText) continue;
+      if (isSystemInjectedPrompt(t.promptText)) continue;
       const normalized = normalize(t.promptText);
       if (normalized.length < o.minPromptChars) continue;
       if (normalized.length > o.maxPromptChars) continue;
@@ -126,6 +151,8 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
         normalized,
         trigrams: trigramsOf(normalized),
         workspace: s.workspaceName,
+        sessionId: s.sessionId,
+        timestamp: t.ts,
         cost,
         tokens,
       });
@@ -134,7 +161,51 @@ function collectPrompts(sessions: Session[], o: Required<ClusterOptions>): Promp
   return out;
 }
 
-function normalize(s: string): string {
+// Drops prompts that are system-injected XML wrappers (slash-command echoes,
+// task-notification payloads, bash-input wrappers, command-stdout dumps) or
+// pure slash commands with no real intent text. These aren't authored requests
+// — they're harness plumbing — so clustering them produces nonsense recs like
+// "turn /compact into a skill."
+export function isSystemInjectedPrompt(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  // Image-attachment metadata wrappers Claude Code injects when the user pastes
+  // a screenshot — never authored intent.
+  if (/^\[Image:\s/i.test(trimmed)) return true;
+  // Prompts that LEAD with an IDE/system tag are auto-generated context, even
+  // if the closing tag is missing or pushed out by truncation. Treat them as
+  // injected regardless of trailing content — the user didn't write them.
+  if (/^<(ide_opened_file|ide_selection|ide-opened-file|ide-selection|local-command-stdout|local-command-stderr|bash-stdout|bash-stderr|task-notification|system-reminder)\b/i.test(trimmed)) {
+    return true;
+  }
+  // Strip known wrapper tags and their contents, then see if anything is left.
+  const stripped = trimmed
+    .replace(/<command-name>[\s\S]*?<\/command-name>/gi, '')
+    .replace(/<command-message>[\s\S]*?<\/command-message>/gi, '')
+    .replace(/<command-args>[\s\S]*?<\/command-args>/gi, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, '')
+    .replace(/<task-id>[\s\S]*?<\/task-id>/gi, '')
+    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/gi, '')
+    .replace(/<output-file>[\s\S]*?<\/output-file>/gi, '')
+    .replace(/<bash-input>[\s\S]*?<\/bash-input>/gi, '')
+    .replace(/<bash-stdout>[\s\S]*?<\/bash-stdout>/gi, '')
+    .replace(/<bash-stderr>[\s\S]*?<\/bash-stderr>/gi, '')
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/gi, '')
+    .replace(/<local-command-stderr>[\s\S]*?<\/local-command-stderr>/gi, '')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '')
+    // IDE-context wrappers (file-opened, file-selection notifications).
+    .replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/gi, '')
+    .replace(/<ide_selection>[\s\S]*?<\/ide_selection>/gi, '')
+    .replace(/<ide-opened-file>[\s\S]*?<\/ide-opened-file>/gi, '')
+    .replace(/<ide-selection>[\s\S]*?<\/ide-selection>/gi, '')
+    .trim();
+  if (stripped.length === 0) return true;
+  // Pure slash command (e.g. "/compact", "/clear") — built-ins, not skill work.
+  if (/^\/[a-z][\w:-]*\s*$/i.test(stripped)) return true;
+  return false;
+}
+
+export function normalize(s: string): string {
   return s
     .toLowerCase()
     // Strip fenced code blocks entirely — they're not part of the request shape.
@@ -152,7 +223,7 @@ function normalize(s: string): string {
     .trim();
 }
 
-function trigramsOf(s: string): Set<string> {
+export function trigramsOf(s: string): Set<string> {
   const out = new Set<string>();
   if (s.length < 3) {
     out.add(s);

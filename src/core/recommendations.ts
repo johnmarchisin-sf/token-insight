@@ -11,9 +11,26 @@
 import { Session, PromptCluster } from './types.js';
 import { ContextReport, GlobalContextReport } from './context-inspector.js';
 import { FileReadStat, rereadCandidates } from './file-reads.js';
+import { DenylistEntry } from './config.js';
+import { findDenylistMatch } from './cluster-id.js';
+import { SkillCatalogEntry } from './skill-catalog.js';
+import { overlapCoefficient } from './cluster-id.js';
+import { BashPattern, extractBashPatterns } from './bash-patterns.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
+
+export const SKILL_MATCH_OVERLAP = 0.5;
+export const SUBAGENT_EXPLORE_MIN = 15;
+export const BORDERLINE_MIN_RECENT_SIZE = 3;
+export const BORDERLINE_MIN_RECENT_TOKENS = 10_000;
+// Wide-net thresholds — easy to tune up once we see real recs.
+export const BASH_HOOK_MIN_COUNT = 5;
+export const BASH_HOOK_MIN_SESSIONS = 2;
+export const BASH_HOOK_POST_EDIT_RATIO = 0.5;
+export const BASH_HOOK_SESSION_START_MIN = 5;
+export const BASH_HOOK_SESSION_START_RATIO = 0.5;
+export const CLUSTER_SUBAGENT_AVG_EXPLORE_MIN = 10;
 
 export interface Recommendation {
   kind: RecKind;
@@ -30,13 +47,20 @@ export interface RecommendInputs {
   contextReports: ContextReport[];
   globalContext: GlobalContextReport;
   fileReads: FileReadStat[];
+  denylist?: DenylistEntry[];
+  includeHidden?: boolean;
+  skillCatalog?: SkillCatalogEntry[];
 }
 
 export function buildRecommendations(inputs: RecommendInputs): Recommendation[] {
   const recs: Recommendation[] = [];
-  recs.push(...skillRecs(inputs.clusters));
+  recs.push(...skillRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false, inputs.skillCatalog ?? []));
+  recs.push(...borderlineRecs(inputs.clusters, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...contextRecs(inputs.contextReports, inputs.globalContext));
   recs.push(...rereadRecs(inputs.fileReads));
+  recs.push(...bashHookRecs(inputs.sessions));
+  recs.push(...sessionSubagentRecs(inputs.sessions));
+  recs.push(...clusterSubagentRecs(inputs.clusters, inputs.sessions, inputs.denylist ?? [], inputs.includeHidden ?? false));
   recs.push(...subagentRecs(inputs.sessions));
   recs.push(...modelRecs(inputs.sessions));
   return recs.sort(severityOrder);
@@ -44,30 +68,148 @@ export function buildRecommendations(inputs: RecommendInputs): Recommendation[] 
 
 // ----- Skill candidates from prompt clusters --------------------------------
 
-function skillRecs(clusters: PromptCluster[]): Recommendation[] {
+function skillRecs(
+  clusters: PromptCluster[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+  catalog: SkillCatalogEntry[],
+): Recommendation[] {
   const out: Recommendation[] = [];
   for (let i = 0; i < clusters.length; i++) {
     const c = clusters[i];
     if (c.size < 3) continue;
     if (c.totalTokens < 50_000) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+
+    const matched = bestSkillMatch(c.trigrams, catalog);
+    const baseEvidence = {
+      clusterId: c.id,
+      clusterIndex: i + 1,
+      size: c.size,
+      totalTokens: c.totalTokens,
+      workspaces: c.workspaces,
+      representative: c.representative,
+      examplePrompts: c.examplePrompts,
+      hidden: match ? match.reason : undefined,
+    };
+
+    const repShort = describeCluster(c.representative);
+
+    if (matched) {
+      out.push({
+        kind: 'skill',
+        severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
+        title: `${titlePrefix}Use skill — ${matched.entry.label}: "${repShort}"`,
+        body:
+          `You've made ${c.size} similar requests (${formatTokens(c.totalTokens)} tokens) that look like they should ` +
+          `be triggering ${matched.entry.label} (${matched.entry.source}). The skill isn't picking these up. ` +
+          `Two ways to fix it: tighten the description so it triggers on these phrases, or — if the skill is ` +
+          `workspace-scoped — promote it to global.\n` +
+          `Skill file: ${matched.entry.skillPath}`,
+        action: `code ${matched.entry.skillPath}`,
+        evidence: {
+          ...baseEvidence,
+          matchedSkill: {
+            label: matched.entry.label,
+            name: matched.entry.name,
+            source: matched.entry.source,
+            skillPath: matched.entry.skillPath,
+            similarity: matched.similarity,
+          },
+        },
+      });
+      continue;
+    }
+
     out.push({
       kind: 'skill',
       severity: c.totalTokens > 500_000 ? 'high' : c.size >= 5 ? 'medium' : 'low',
-      title: `Turn this into a skill — repeated ${c.size}× across ${c.workspaces.length} workspace(s)`,
+      title: `${titlePrefix}Turn into skill: "${repShort}"`,
       body:
         `You've made ${c.size} similar requests that consumed ${formatTokens(c.totalTokens)} tokens combined. ` +
         `Bundling the workflow into a slash command, hook, or skill replaces the boilerplate prompt with a tight invocation. ` +
         `Representative prompt: "${truncate(c.representative, 160)}"`,
       action: `ti draft-skill --cluster ${i + 1}`,
+      evidence: baseEvidence,
+    });
+  }
+  return out;
+}
+
+// Clusters that haven't yet crossed the full skill threshold (size >= 3,
+// tokens >= 50k) but are picking up steam in the last 7 days. Surfaces them as
+// low-severity recs so the user can flag them as future skills early.
+function borderlineRecs(
+  clusters: PromptCluster[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+): Recommendation[] {
+  const out: Recommendation[] = [];
+  for (let i = 0; i < clusters.length; i++) {
+    const c = clusters[i];
+    // Skip anything skillRecs already emitted.
+    if (c.size >= 3 && c.totalTokens >= 50_000) continue;
+    if (c.recentSize < BORDERLINE_MIN_RECENT_SIZE) continue;
+    if (c.recentTokens < BORDERLINE_MIN_RECENT_TOKENS) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+    const repShort = describeCluster(c.representative);
+    out.push({
+      kind: 'skill',
+      severity: 'low',
+      title: `${titlePrefix}Trending — keep an eye on: "${repShort}"`,
+      body:
+        `Below the skill threshold today (${c.size} total, ${formatTokens(c.totalTokens)} tokens), but ${c.recentSize}× ` +
+        `in the last 7 days (${formatTokens(c.recentTokens)} tokens). If this keeps repeating it's worth turning into ` +
+        `a skill before it eats more context. Hide if it's a one-off coincidence.`,
+      action: `ti draft-skill --cluster ${i + 1}`,
       evidence: {
+        clusterId: c.id,
         clusterIndex: i + 1,
         size: c.size,
         totalTokens: c.totalTokens,
+        recentSize: c.recentSize,
+        recentTokens: c.recentTokens,
         workspaces: c.workspaces,
+        representative: c.representative,
+        examplePrompts: c.examplePrompts,
+        borderline: true,
+        hidden: match ? match.reason : undefined,
       },
     });
   }
   return out;
+}
+
+interface SkillMatch {
+  entry: SkillCatalogEntry;
+  similarity: number;
+}
+
+function bestSkillMatch(clusterTrigrams: string[], catalog: SkillCatalogEntry[]): SkillMatch | null {
+  let best: SkillMatch | null = null;
+  for (const entry of catalog) {
+    if (entry.referenceTrigrams.length === 0) continue;
+    const sim = overlapCoefficient(clusterTrigrams, entry.referenceTrigrams);
+    if (sim < SKILL_MATCH_OVERLAP) continue;
+    if (!best || sim > best.similarity) best = { entry, similarity: sim };
+  }
+  return best;
+}
+
+// Pulls a short, human-readable summary out of a cluster's representative
+// prompt for use in rec titles. Strips obvious boilerplate ("can you", "please",
+// "i want to") so the title leads with the verb/noun. Caps at ~70 chars.
+function describeCluster(rep: string): string {
+  const cleaned = rep
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(can you|could you|please|i want to|i'd like to|let's|hey)\s+/i, '')
+    .replace(/^(can we|could we)\s+/i, '');
+  return truncate(cleaned, 70);
 }
 
 // ----- CLAUDE.md / context bloat --------------------------------------------
@@ -136,6 +278,67 @@ function contextRecs(reports: ContextReport[], global: GlobalContextReport): Rec
         evidence: { workspace: r.workspaceName, bulky: r.bulkyImports },
       });
     }
+
+    // Decaying-state sections — concrete "move this to STATUS.md" recs.
+    for (const sec of r.decayingSections) {
+      out.push({
+        kind: 'context',
+        severity: sec.lineCount > 40 ? 'medium' : 'low',
+        title:
+          `${r.workspaceName}: '${sec.heading}' section in CLAUDE.md ` +
+          `(lines ${sec.startLine}-${sec.endLine}, ~${formatTokens(sec.estimatedTokens)} tok)`,
+        body:
+          `This section reads like decaying state — content that goes stale between edits and ` +
+          `pays a token tax on every prompt in this workspace. Move it to docs/STATUS.md ` +
+          `(or another canonical living doc) and reference from CLAUDE.md if needed.`,
+        action: `Move lines ${sec.startLine}-${sec.endLine} of ${sec.fromFile} into docs/STATUS.md`,
+        evidence: {
+          workspace: r.workspaceName,
+          file: sec.fromFile,
+          heading: sec.heading,
+          lines: [sec.startLine, sec.endLine],
+          tokens: sec.estimatedTokens,
+        },
+      });
+    }
+
+    // Drifting CLAUDE.md — old AND active workspace.
+    if (r.isDrifting && r.daysSinceModified !== undefined) {
+      out.push({
+        kind: 'context',
+        severity: 'medium',
+        title:
+          `${r.workspaceName}: CLAUDE.md is ${r.daysSinceModified} days old; ` +
+          `${r.recentSessionCount} sessions since`,
+        body:
+          `You've had ${r.recentSessionCount} session(s) in this workspace since the last ` +
+          `CLAUDE.md edit ${r.daysSinceModified} days ago. Doc has likely drifted from what ` +
+          `you're actually doing — quick read-and-update pass recommended.`,
+        evidence: {
+          workspace: r.workspaceName,
+          daysSinceModified: r.daysSinceModified,
+          recentSessionCount: r.recentSessionCount,
+        },
+      });
+    }
+
+    // Stale CLAUDE.md — old, but no recent activity (drift takes precedence).
+    if (r.isStale && r.daysSinceModified !== undefined) {
+      out.push({
+        kind: 'context',
+        severity: 'low',
+        title: `${r.workspaceName}: CLAUDE.md not edited in ${r.daysSinceModified} days`,
+        body:
+          `Workspace CLAUDE.md hasn't been touched in ${r.daysSinceModified} days. Could be ` +
+          `fine if the workspace is dormant; review whether anything in it is now wrong or ` +
+          `out of date.`,
+        evidence: {
+          workspace: r.workspaceName,
+          daysSinceModified: r.daysSinceModified,
+          recentSessionCount: r.recentSessionCount,
+        },
+      });
+    }
   }
   return out;
 }
@@ -166,6 +369,113 @@ function rereadRecs(fileReads: FileReadStat[]): Recommendation[] {
   }
   return out;
 }
+
+// ----- Repeated bash commands → PostToolUse / SessionStart hook -------------
+
+function bashHookRecs(sessions: Session[]): Recommendation[] {
+  const patterns = extractBashPatterns(sessions);
+  const out: Recommendation[] = [];
+
+  for (const p of patterns) {
+    if (p.count < BASH_HOOK_MIN_COUNT) continue;
+    // Skip single-session patterns — that's just iteration on one task, not a
+    // habit worth hooking.
+    if (p.sessionCount < BASH_HOOK_MIN_SESSIONS) continue;
+    const example = p.examples[0] || p.shape;
+
+    const postEditRatio = p.postEditCount / p.count;
+    if (postEditRatio >= BASH_HOOK_POST_EDIT_RATIO && p.postEditCount >= BASH_HOOK_MIN_COUNT) {
+      out.push({
+        kind: 'hook',
+        severity: p.count > 25 ? 'high' : 'medium',
+        title: `Hook candidate (PostToolUse): "${truncate(example, 60)}"`,
+        body:
+          `"${example}" runs ${p.count}× across ${p.sessionCount} session(s) in ${p.workspaceCount} workspace(s), ` +
+          `${Math.round(postEditRatio * 100)}% of the time right after a file edit. Adding it as a PostToolUse hook ` +
+          `on Edit|Write|MultiEdit means it runs automatically — no more typing it. Drop the snippet below into ` +
+          `~/.claude/settings.json (global) or <workspace>/.claude/settings.json (project-local).`,
+        action: '~/.claude/settings.json',
+        evidence: {
+          shape: p.shape,
+          example,
+          count: p.count,
+          sessionCount: p.sessionCount,
+          workspaceCount: p.workspaceCount,
+          postEditCount: p.postEditCount,
+          postEditRatio,
+          hookSnippet: renderPostEditHook(example),
+        },
+      });
+      continue;
+    }
+
+    const sessionStartRatio = p.sessionStartCount / p.sessionCount;
+    if (
+      p.sessionStartCount >= BASH_HOOK_SESSION_START_MIN &&
+      sessionStartRatio >= BASH_HOOK_SESSION_START_RATIO
+    ) {
+      out.push({
+        kind: 'hook',
+        severity: 'medium',
+        title: `Hook candidate (SessionStart): "${truncate(example, 60)}"`,
+        body:
+          `"${example}" runs at the start of ${p.sessionStartCount} session(s) (${Math.round(sessionStartRatio * 100)}% ` +
+          `of sessions where it's used at all). Promoting this to a SessionStart hook means it runs once per session ` +
+          `automatically — and the result is cached, not re-typed. Drop the snippet below into your settings.json.`,
+        action: '~/.claude/settings.json',
+        evidence: {
+          shape: p.shape,
+          example,
+          count: p.count,
+          sessionCount: p.sessionCount,
+          workspaceCount: p.workspaceCount,
+          sessionStartCount: p.sessionStartCount,
+          sessionStartRatio,
+          hookSnippet: renderSessionStartHook(example),
+        },
+      });
+    }
+  }
+
+  return out;
+}
+
+function renderPostEditHook(command: string): string {
+  return [
+    '{',
+    '  "hooks": {',
+    '    "PostToolUse": [',
+    '      {',
+    '        "matcher": "Edit|Write|MultiEdit",',
+    '        "hooks": [',
+    `          { "type": "command", "command": ${JSON.stringify(command)} }`,
+    '        ]',
+    '      }',
+    '    ]',
+    '  }',
+    '}',
+  ].join('\n');
+}
+
+function renderSessionStartHook(command: string): string {
+  return [
+    '{',
+    '  "hooks": {',
+    '    "SessionStart": [',
+    '      {',
+    '        "hooks": [',
+    `          { "type": "command", "command": ${JSON.stringify(command)} }`,
+    '        ]',
+    '      }',
+    '    ]',
+    '  }',
+    '}',
+  ].join('\n');
+}
+
+// Re-export so tests / future callers can use the shape directly.
+export { extractBashPatterns };
+export type { BashPattern };
 
 // ----- Subagent opportunities -----------------------------------------------
 
@@ -203,6 +513,136 @@ function subagentRecs(sessions: Session[]): Recommendation[] {
   }
   return out;
 }
+
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+interface SessionExplorationProfile {
+  exploreCount: number;
+  hadEdit: boolean;
+  usedSubagent: boolean;
+}
+
+function computeSessionProfile(s: Session): SessionExplorationProfile {
+  let exploreCount = 0;
+  let hadEdit = false;
+  let usedSubagent = false;
+  let stopCounting = false;
+
+  for (const t of s.turns) {
+    if (t.isSidechain) usedSubagent = true;
+    if (!t.toolCalls) continue;
+    for (const tc of t.toolCalls) {
+      if (tc.name === 'Task') usedSubagent = true;
+      if (stopCounting) continue;
+      if (READ_TOOLS.has(tc.name)) {
+        exploreCount += 1;
+      } else if (EDIT_TOOLS.has(tc.name)) {
+        hadEdit = true;
+        stopCounting = true;
+      }
+    }
+  }
+
+  return { exploreCount, hadEdit, usedSubagent };
+}
+
+function sessionSubagentRecs(sessions: Session[]): Recommendation[] {
+  interface Candidate {
+    session: Session;
+    profile: SessionExplorationProfile;
+  }
+  const candidates: Candidate[] = [];
+
+  for (const s of sessions) {
+    const profile = computeSessionProfile(s);
+    if (profile.usedSubagent) continue;
+    if (profile.exploreCount < SUBAGENT_EXPLORE_MIN) continue;
+    candidates.push({ session: s, profile });
+  }
+
+  candidates.sort((a, b) => b.profile.exploreCount - a.profile.exploreCount);
+  const top = candidates.slice(0, 10);
+
+  return top.map((c) => ({
+    kind: 'subagent' as RecKind,
+    severity: c.profile.exploreCount > 30 ? ('high' as RecSeverity) : ('medium' as RecSeverity),
+    title: `Exploration without subagent — ${c.session.workspaceName}, ${c.session.startedAt.toLocaleString()}`,
+    body:
+      `This session made ${c.profile.exploreCount} Read/Glob/Grep calls ` +
+      `${c.profile.hadEdit ? 'before its first Edit' : 'and never edited a file'} and didn't use the Task agent. ` +
+      `Long upfront exploration consumes the main context window — Task subagents have isolated transcripts ` +
+      `that don't pollute your main session.`,
+    evidence: {
+      sessionId: c.session.sessionId,
+      workspace: c.session.workspaceName,
+      exploreCount: c.profile.exploreCount,
+      hadEdit: c.profile.hadEdit,
+      sessionStartedAt: c.session.startedAt.toISOString(),
+    },
+  }));
+}
+
+// Cluster-level subagent rec: when a recurring prompt cluster's source sessions
+// average heavy exploration without Task, the cluster itself is a subagent
+// candidate (sibling to the existing skill rec — the user can choose).
+function clusterSubagentRecs(
+  clusters: PromptCluster[],
+  sessions: Session[],
+  denylist: DenylistEntry[],
+  includeHidden: boolean,
+): Recommendation[] {
+  if (clusters.length === 0 || sessions.length === 0) return [];
+  const profileBySession = new Map<string, SessionExplorationProfile>();
+  for (const s of sessions) profileBySession.set(s.sessionId, computeSessionProfile(s));
+
+  const out: Recommendation[] = [];
+  for (let i = 0; i < clusters.length; i++) {
+    const c = clusters[i];
+    if (c.size < 3) continue;
+    const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
+    if (match && !includeHidden) continue;
+
+    let totalExplore = 0;
+    let n = 0;
+    let anyTask = false;
+    for (const sid of c.sessionIds) {
+      const p = profileBySession.get(sid);
+      if (!p) continue;
+      if (p.usedSubagent) anyTask = true;
+      totalExplore += p.exploreCount;
+      n += 1;
+    }
+    if (n === 0) continue;
+    if (anyTask) continue; // user already uses subagents for this cluster
+    const avgExplore = totalExplore / n;
+    if (avgExplore < CLUSTER_SUBAGENT_AVG_EXPLORE_MIN) continue;
+
+    const repShort = describeCluster(c.representative);
+    const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
+    out.push({
+      kind: 'subagent',
+      severity: avgExplore > 25 ? 'high' : 'medium',
+      title: `${titlePrefix}Dispatch via Task: "${repShort}"`,
+      body:
+        `This cluster of ${c.size} similar prompts averages ${avgExplore.toFixed(1)} Read/Glob/Grep calls before any ` +
+        `edit, and you've never delegated it. When the same exploration-heavy question keeps recurring, the cleanest ` +
+        `fix isn't a skill — it's wrapping the trigger phrase in a Task dispatch so the exploration happens in an ` +
+        `isolated subagent transcript. Lower main-context cost, faster answers.`,
+      evidence: {
+        clusterId: c.id,
+        clusterIndex: i + 1,
+        size: c.size,
+        avgExplore,
+        sessionsConsidered: n,
+        workspaces: c.workspaces,
+        representative: c.representative,
+      },
+    });
+  }
+  return out;
+}
+
 
 // ----- Model usage ---------------------------------------------------------
 

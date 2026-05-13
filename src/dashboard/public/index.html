@@ -17,11 +17,6 @@
   </header>
 
   <main>
-    <section class="card" id="recs-card">
-      <h2>Optimization recommendations <span class="hint">concrete actions to reduce token consumption</span></h2>
-      <div id="recs-list"></div>
-    </section>
-
     <section class="active-window card" id="active-card">
       <h2>Active 5-hour window</h2>
       <div id="active-empty" class="empty hidden">No active window. Your last rate window has closed.</div>
@@ -64,32 +59,47 @@
 
     <section class="card">
       <h2>Recent 5-hour windows <span class="hint">how full each window got, vs your recent peak</span></h2>
-      <canvas id="chart-blocks" height="100"></canvas>
+      <div class="chart-wrap h-sm">
+        <canvas id="chart-blocks"></canvas>
+      </div>
     </section>
 
     <div class="grid-2">
       <section class="card">
         <h2>Time of day <span class="hint">when in the day you typically burn tokens</span></h2>
-        <canvas id="chart-hours" height="180"></canvas>
+        <div class="chart-wrap h-md">
+          <canvas id="chart-hours"></canvas>
+        </div>
       </section>
       <section class="card">
         <h2>Daily tokens</h2>
-        <canvas id="chart-daily" height="180"></canvas>
+        <div class="chart-wrap h-md">
+          <canvas id="chart-daily"></canvas>
+        </div>
       </section>
     </div>
 
     <div class="grid-2">
       <section class="card">
         <h2>By workspace</h2>
-        <canvas id="chart-workspaces" height="180"></canvas>
+        <div class="chart-wrap h-lg">
+          <canvas id="chart-workspaces"></canvas>
+        </div>
         <table id="table-workspaces" class="data-table"></table>
       </section>
       <section class="card">
         <h2>By model</h2>
-        <canvas id="chart-models" height="180"></canvas>
+        <div class="chart-wrap h-lg">
+          <canvas id="chart-models"></canvas>
+        </div>
         <table id="table-models" class="data-table"></table>
       </section>
     </div>
+
+    <section class="card" id="recs-card">
+      <h2>Optimization recommendations <span class="hint">concrete actions to reduce token consumption</span></h2>
+      <div id="recs-list"></div>
+    </section>
 
     <section class="card">
       <h2>High-usage sessions <span class="hint">outliers, cache-bloated, or overlong — token offenders to investigate</span></h2>
@@ -103,8 +113,8 @@
 
     <div class="grid-2">
       <section class="card">
-        <h2>CLAUDE.md bloat <span class="hint">workspaces with the heaviest context overhead</span></h2>
-        <table id="table-context" class="data-table"></table>
+        <h2>CLAUDE.md health <span class="hint">per-workspace findings, sorted by issue count</span></h2>
+        <div id="context-cards"></div>
       </section>
       <section class="card">
         <h2>Most-read files <span class="hint">candidates for @-import or a SessionStart hook</span></h2>
