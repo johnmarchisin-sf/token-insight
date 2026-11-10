@@ -5,3 +5,6 @@ dist/
 .env
 .env.local
 *.tsbuildinfo
+
+# Claude agent: per worktree notes (Layer 3)
+CLAUDE.local.md
