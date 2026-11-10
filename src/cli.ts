@@ -10,6 +10,8 @@ import { runRecommend } from './commands/recommend.js';
 import { runContext } from './commands/context.js';
 import { runDraftSkill } from './commands/draft-skill.js';
 import { runUndeny } from './commands/undeny.js';
+import { runProfileShow, runProfileSet } from './commands/profile.js';
+import { initProfile } from './core/config.js';
 
 const program = new Command();
 
@@ -97,7 +99,7 @@ program
 
 program
   .command('blocks')
-  .description('Live view of your 5-hour rate-limit windows (active + recent)')
+  .description('5-hour usage windows (active + recent) — most useful when bumping up against subscription rate limits')
   .option('--json', 'Output JSON instead of a formatted view')
   .option('--recent <n>', 'How many recent windows to show', (v) => parseInt(v, 10), 14)
   .option('--lookback-days <n>', 'How many days back to derive your peak window from', (v) => parseInt(v, 10), 30)
@@ -114,15 +116,33 @@ program
     await runDashboard(opts);
   });
 
-// Bare invocation (`ti` with no args) → dashboard.
-if (process.argv.length <= 2) {
-  runDashboard({}).catch((err) => {
-    console.error(err);
-    process.exit(1);
+const profileCmd = program
+  .command('profile')
+  .description('Show or change the active profile (personal | ic)');
+profileCmd
+  .command('show', { isDefault: true })
+  .description('Print the active profile and its settings')
+  .option('--json', 'Output JSON instead of formatted text')
+  .action(async (opts) => {
+    await runProfileShow(opts);
   });
-} else {
-  program.parseAsync(process.argv).catch((err) => {
-    console.error(err);
-    process.exit(1);
+profileCmd
+  .command('set <name>')
+  .description('Set the active profile (personal | ic)')
+  .action(async (name: string) => {
+    await runProfileSet(name);
   });
+
+async function main(): Promise<void> {
+  await initProfile();
+  if (process.argv.length <= 2) {
+    await runDashboard({});
+    return;
+  }
+  await program.parseAsync(process.argv);
 }
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

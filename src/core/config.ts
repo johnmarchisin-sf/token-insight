@@ -7,6 +7,13 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {
+  ProfileName,
+  DEFAULT_PROFILE,
+  isValidProfileName,
+  setActiveProfileSettings,
+  mergeProfile,
+} from './profile.js';
 
 export interface DenylistEntry {
   id: string;
@@ -18,10 +25,18 @@ export interface DenylistEntry {
 
 export interface TokenInsightConfig {
   clusterDenylist: DenylistEntry[];
+  profile: ProfileName;
+  /** Extra top-level dirs to bucket workspaces by, on top of the profile preset. */
+  customKnownBuckets: string[];
+  /** Extra deep-rollup buckets to merge with the profile preset. */
+  customDeepRollupBuckets: Record<string, string[]>;
 }
 
 const DEFAULT_CONFIG: TokenInsightConfig = {
   clusterDenylist: [],
+  profile: DEFAULT_PROFILE,
+  customKnownBuckets: [],
+  customDeepRollupBuckets: {},
 };
 
 function configPath(): string {
@@ -58,7 +73,52 @@ function normalize(parsed: unknown): TokenInsightConfig {
       });
     }
   }
-  return { clusterDenylist: clean };
+  const profileRaw = obj.profile;
+  const profile: ProfileName =
+    typeof profileRaw === 'string' && isValidProfileName(profileRaw)
+      ? profileRaw
+      : DEFAULT_PROFILE;
+
+  const customKnownBuckets = Array.isArray(obj.customKnownBuckets)
+    ? (obj.customKnownBuckets as unknown[]).filter((v): v is string => typeof v === 'string')
+    : [];
+
+  const customDeepRollupBuckets: Record<string, string[]> = {};
+  if (obj.customDeepRollupBuckets && typeof obj.customDeepRollupBuckets === 'object') {
+    for (const [k, v] of Object.entries(obj.customDeepRollupBuckets as Record<string, unknown>)) {
+      if (Array.isArray(v)) {
+        const subs = v.filter((s): s is string => typeof s === 'string');
+        if (subs.length > 0) customDeepRollupBuckets[k] = subs;
+      }
+    }
+  }
+  return { clusterDenylist: clean, profile, customKnownBuckets, customDeepRollupBuckets };
+}
+
+function applyEffectiveProfile(c: TokenInsightConfig): void {
+  setActiveProfileSettings(
+    mergeProfile(c.profile, {
+      knownBuckets: c.customKnownBuckets,
+      deepRollupBuckets: c.customDeepRollupBuckets,
+    })
+  );
+}
+
+/**
+ * Load the persisted profile and apply it (merged with user overrides) as the
+ * active profile. Called once at startup before any command dispatches.
+ */
+export async function initProfile(): Promise<ProfileName> {
+  const c = await loadConfig();
+  applyEffectiveProfile(c);
+  return c.profile;
+}
+
+export async function setProfile(name: ProfileName): Promise<void> {
+  const c = await loadConfig();
+  c.profile = name;
+  await saveConfig(c);
+  applyEffectiveProfile(c);
 }
 
 export async function loadConfig(): Promise<TokenInsightConfig> {

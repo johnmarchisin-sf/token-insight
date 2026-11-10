@@ -1,6 +1,6 @@
 import { loadAllSessions } from '../core/jsonl-loader.js';
 import { byWorkspace, byWorkspaceGroup, totalsAcross } from '../core/aggregator.js';
-import { fmtTokens, table, bold, dim } from './format.js';
+import { fmtTokens, fmtCost, table, bold, dim } from './format.js';
 
 export interface WorkspacesOpts {
   json?: boolean;
@@ -34,7 +34,7 @@ export async function runWorkspaces(opts: WorkspacesOpts): Promise<void> {
     bold(`Workspace breakdown` + (days ? ` (last ${days} days)` : ' (all time)'))
   );
   console.log(
-    `${fmtTokens(totals.totalTokens)} tokens  ` +
+    `${fmtTokens(totals.totalTokens)} tokens · ${fmtCost(totals.cost)}  ` +
       dim(`(${totals.sessionCount} sessions)`)
   );
   console.log();
@@ -46,9 +46,10 @@ export async function runWorkspaces(opts: WorkspacesOpts): Promise<void> {
         groups.map((b) => ({
           group: b.label,
           tokens: fmtTokens(b.totalTokens),
+          cost: fmtCost(b.cost),
           sessions: String(b.sessionCount),
         })),
-        ['group', 'tokens', 'sessions']
+        ['group', 'tokens', 'cost', 'sessions']
       )
     );
     console.log();
@@ -60,10 +61,11 @@ export async function runWorkspaces(opts: WorkspacesOpts): Promise<void> {
       ws.map((b) => ({
         workspace: b.label,
         tokens: fmtTokens(b.totalTokens),
+        cost: fmtCost(b.cost),
         sessions: String(b.sessionCount),
         turns: String(b.turnCount),
       })),
-      ['workspace', 'tokens', 'sessions', 'turns']
+      ['workspace', 'tokens', 'cost', 'sessions', 'turns']
     )
   );
 }

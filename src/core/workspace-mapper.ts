@@ -3,6 +3,7 @@
 
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { getActiveProfile } from './profile.js';
 
 /**
  * Claude Code encodes the cwd by replacing path separators and dots with `-`.
@@ -25,58 +26,70 @@ export function workspaceNameFromPath(p: string): string {
 }
 
 /**
- * Group a workspace into a bucket for rollups.
+ * Group a workspace into a bucket for rollups, driven by the active profile.
  *
  * Rules (in order):
- *   1. If under ~/conductor/<x>/...   -> group = "conductor"
- *   2. If under ~/<known-bucket>/...  -> group = that bucket
- *   3. Otherwise                       -> group = "other"
- *
- * Adjust KNOWN_BUCKETS to taste.
+ *   1. If under ~/<deep-rollup-bucket>/...    -> group = that bucket
+ *   2. If under ~/<known-bucket>/...          -> group = that bucket
+ *   3. If any path segment matches a deep-rollup bucket name (handles paths
+ *      outside $HOME) -> group = that bucket
+ *   4. Otherwise                               -> group = "other"
  */
-const KNOWN_BUCKETS = ['conductor', 'projects', 'work', 'code', 'src'];
-const CONDUCTOR_SUBBUCKETS = ['workspaces', 'production', 'sandbox'];
-
 export function groupForWorkspace(workspacePath: string): string {
+  const profile = getActiveProfile();
   const home = homedir();
+  const deepRollup = Object.keys(profile.deepRollupBuckets);
+
   if (workspacePath.startsWith(home + '/')) {
     const rel = workspacePath.slice(home.length + 1);
     const first = rel.split('/')[0];
-    if (KNOWN_BUCKETS.includes(first)) return first;
+    if (profile.knownBuckets.includes(first)) return first;
+    if (deepRollup.includes(first)) return first;
   }
-  // Any path containing /conductor/ as a segment groups under conductor.
-  if (workspacePath.split('/').includes('conductor')) return 'conductor';
+  // Catch paths outside $HOME that still live under one of the deep-rollup
+  // buckets (e.g. an absolute path that contains /conductor/ as a segment).
+  const segs = workspacePath.split('/').filter(Boolean);
+  for (const bucket of deepRollup) {
+    if (segs.includes(bucket)) return bucket;
+  }
   return 'other';
 }
 
 /**
- * If the workspace lives under ~/conductor/<name>/..., return <name> so we can
- * roll up subdirectories of a workspace under a single label. Otherwise return
- * the workspace's own short name.
+ * Roll up a workspace path to a stable label.
+ *
+ * Profiles can declare deep-rollup buckets: for ~/<bucket>/<sub>/<project>/...,
+ * the <project> segment becomes the label (used by IC's conductor layout where
+ * many workspace directories share a project). For ordinary known buckets, the
+ * label is the immediate child segment. Falls back to the directory's basename.
  */
 export function rollupNameForPath(workspacePath: string): string {
+  const profile = getActiveProfile();
   const home = homedir();
+
   if (workspacePath.startsWith(home + '/')) {
     const rel = workspacePath.slice(home.length + 1);
     const parts = rel.split('/').filter(Boolean);
-    // Conductor convention: ~/conductor/<sub-bucket>/<project>/<workspace>/...
-    // Use the project segment, not the sub-bucket.
-    if (
-      parts.length >= 3 &&
-      parts[0] === 'conductor' &&
-      CONDUCTOR_SUBBUCKETS.includes(parts[1])
-    ) {
-      return parts[2];
+    for (const [bucket, subs] of Object.entries(profile.deepRollupBuckets)) {
+      if (parts.length >= 3 && parts[0] === bucket && subs.includes(parts[1])) {
+        return parts[2];
+      }
     }
-    if (parts.length >= 2 && KNOWN_BUCKETS.includes(parts[0])) {
+    if (parts.length >= 2 && profile.knownBuckets.includes(parts[0])) {
+      return parts[1];
+    }
+    if (parts.length >= 2 && Object.keys(profile.deepRollupBuckets).includes(parts[0])) {
       return parts[1];
     }
   }
-  // Fallback: try matching /conductor/ anywhere in the path.
+  // Last-resort: locate any deep-rollup bucket name as a path segment and use
+  // the next segment as the label.
   const segs = workspacePath.split('/').filter(Boolean);
-  const idx = segs.indexOf('conductor');
-  if (idx >= 0 && idx < segs.length - 1) {
-    return segs[idx + 1];
+  for (const bucket of Object.keys(profile.deepRollupBuckets)) {
+    const idx = segs.indexOf(bucket);
+    if (idx >= 0 && idx < segs.length - 1) {
+      return segs[idx + 1];
+    }
   }
   return workspaceNameFromPath(workspacePath);
 }

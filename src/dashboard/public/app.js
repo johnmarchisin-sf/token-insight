@@ -9,6 +9,12 @@ const fmtTokens = (n) => {
   return String(Math.round(n));
 };
 const fmtInt = (n) => (n ?? 0).toLocaleString();
+const fmtCost = (n) => {
+  if (n == null || !isFinite(n)) return '$0.00';
+  if (n < 0.005) return '$0.00';
+  if (n < 1000) return '$' + n.toFixed(2);
+  return '$' + Math.round(n).toLocaleString();
+};
 const fmtPct = (n) => `${(n * 100).toFixed(0)}%`;
 const fmtDuration = (ms) => {
   if (ms < 0) ms = 0;
@@ -28,6 +34,16 @@ const HOUR_LABELS = Array.from({ length: 24 }, (_, h) =>
   h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`
 );
 
+function toggleRateLimitUI(on) {
+  // Show or hide all dashboard sections tied to 5-hour rate-limit framing
+  // (active-window card, recent-blocks chart, peak KPI tile).
+  for (const id of ['active-card', 'recent-blocks-card', 'kpi-peak-tile']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.classList.toggle('hidden', !on);
+  }
+}
+
 async function load() {
   $('subtitle').textContent = 'Loading…';
   let data;
@@ -46,14 +62,20 @@ function render(d) {
   $('subtitle').textContent = `Across all Claude Code workspaces · ${d.sessionCount} sessions`;
   $('generated-at').textContent = 'Generated ' + new Date(d.generatedAt).toLocaleString();
 
+  const rateLimitOn = !!(d.profile && d.profile.rateLimitFraming);
+  toggleRateLimitUI(rateLimitOn);
+
   renderRecommendations(d.recommendations || []);
-  renderActive(d);
+  if (rateLimitOn) renderActive(d);
   $('kpi-today-tokens').textContent = fmtTokens(d.todayTotals.totalTokens);
+  $('kpi-today-cost').textContent = fmtCost(d.todayTotals.cost || 0);
   $('kpi-today-sessions').textContent = fmtInt(d.todayTotals.sessionCount);
+  $('kpi-total-cost').textContent = fmtCost(d.totals.cost || 0);
+  $('kpi-total-tokens').textContent = fmtTokens(d.totals.totalTokens || 0) + ' tokens';
   $('kpi-peak').textContent = fmtTokens(d.peakRecent || 0);
   $('kpi-workspaces').textContent = fmtInt(d.byWorkspace.length);
 
-  renderBlocksChart(d.recentBlocks, d.peakRecent);
+  if (rateLimitOn) renderBlocksChart(d.recentBlocks, d.peakRecent);
   renderHoursChart(d.hourOfDay);
   renderDailyChart(d.byDay);
   renderWorkspaceChart(d.byWorkspace);
@@ -650,6 +672,7 @@ function renderWorkspaceTable(byWorkspace) {
     [
       { key: 'label', label: 'Workspace' },
       { key: 'totalTokens', label: 'Tokens', num: true, fmt: fmtTokens },
+      { key: 'cost', label: 'Cost', num: true, fmt: fmtCost },
       { key: 'sessionCount', label: 'Sessions', num: true },
       { key: 'turnCount', label: 'Turns', num: true },
     ],
@@ -662,6 +685,7 @@ function renderModelTable(byModel) {
     [
       { key: 'label', label: 'Model' },
       { key: 'totalTokens', label: 'Tokens', num: true, fmt: fmtTokens },
+      { key: 'cost', label: 'Cost', num: true, fmt: fmtCost },
       { key: 'turnCount', label: 'Turns', num: true },
     ],
     byModel

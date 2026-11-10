@@ -51,13 +51,14 @@
     </section>
 
     <section class="kpis">
-      <div class="kpi"><div class="label">Today's tokens</div><div class="value" id="kpi-today-tokens">—</div></div>
+      <div class="kpi"><div class="label">Today's tokens</div><div class="value" id="kpi-today-tokens">—</div><div class="sub" id="kpi-today-cost">—</div></div>
       <div class="kpi"><div class="label">Today's sessions</div><div class="value" id="kpi-today-sessions">—</div></div>
-      <div class="kpi"><div class="label">Recent peak window</div><div class="value" id="kpi-peak">—</div><div class="sub">last 30 days</div></div>
+      <div class="kpi"><div class="label">All-time cost</div><div class="value" id="kpi-total-cost">—</div><div class="sub" id="kpi-total-tokens">—</div></div>
+      <div class="kpi" id="kpi-peak-tile"><div class="label">Recent peak window</div><div class="value" id="kpi-peak">—</div><div class="sub">last 30 days</div></div>
       <div class="kpi"><div class="label">Workspaces</div><div class="value" id="kpi-workspaces">—</div></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="recent-blocks-card">
       <h2>Recent 5-hour windows <span class="hint">how full each window got, vs your recent peak</span></h2>
       <div class="chart-wrap h-sm">
         <canvas id="chart-blocks"></canvas>
@@ -66,7 +67,7 @@
 
     <div class="grid-2">
       <section class="card">
-        <h2>Time of day <span class="hint">when in the day you typically burn tokens</span></h2>
+        <h2>Time of day <span class="hint">when you typically use tokens</span></h2>
         <div class="chart-wrap h-md">
           <canvas id="chart-hours"></canvas>
         </div>

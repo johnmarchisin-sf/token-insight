@@ -28,6 +28,7 @@ import {
   addDenylistEntry,
   removeDenylistEntry,
 } from '../core/config.js';
+import { getActiveProfile } from '../core/profile.js';
 import { buildSkillScaffold } from '../core/skill-scaffold.js';
 import { loadSkillCatalog } from '../core/skill-catalog.js';
 
@@ -97,8 +98,10 @@ export async function startServer(opts: ServerOptions): Promise<void> {
       skillCatalog,
     });
 
+    const profile = getActiveProfile();
     const data = {
       generatedAt: new Date().toISOString(),
+      profile: { name: profile.name, rateLimitFraming: profile.rateLimitFraming },
       totals: totalsAcross(sessions),
       todayTotals: totalsAcross(today),
       byDay: byDay(sessions),

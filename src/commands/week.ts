@@ -1,6 +1,6 @@
 import { loadAllSessions } from '../core/jsonl-loader.js';
 import { byWorkspace, byDay, totalsAcross } from '../core/aggregator.js';
-import { fmtTokens, table, bold, dim } from './format.js';
+import { fmtTokens, fmtCost, table, bold, dim } from './format.js';
 
 export interface WeekOpts {
   json?: boolean;
@@ -35,7 +35,7 @@ export async function runWeek(opts: WeekOpts): Promise<void> {
 
   console.log(bold(`Last ${days} days`));
   console.log(
-    `${fmtTokens(totals.totalTokens)} tokens  ` +
+    `${fmtTokens(totals.totalTokens)} tokens · ${fmtCost(totals.cost)}  ` +
       dim(`(${totals.sessionCount} sessions across ${ws.length} workspaces)`)
   );
   if (sessions.length === 0) {
@@ -49,10 +49,11 @@ export async function runWeek(opts: WeekOpts): Promise<void> {
       days_.map((b) => ({
         day: b.label,
         tokens: fmtTokens(b.totalTokens),
+        cost: fmtCost(b.cost),
         sessions: String(b.sessionCount),
         turns: String(b.turnCount),
       })),
-      ['day', 'tokens', 'sessions', 'turns']
+      ['day', 'tokens', 'cost', 'sessions', 'turns']
     )
   );
   console.log();
@@ -62,9 +63,10 @@ export async function runWeek(opts: WeekOpts): Promise<void> {
       ws.slice(0, 15).map((b) => ({
         workspace: b.label,
         tokens: fmtTokens(b.totalTokens),
+        cost: fmtCost(b.cost),
         sessions: String(b.sessionCount),
       })),
-      ['workspace', 'tokens', 'sessions']
+      ['workspace', 'tokens', 'cost', 'sessions']
     )
   );
   if (ws.length > 15) {

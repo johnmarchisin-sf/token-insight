@@ -16,21 +16,10 @@ import { findDenylistMatch } from './cluster-id.js';
 import { SkillCatalogEntry } from './skill-catalog.js';
 import { overlapCoefficient } from './cluster-id.js';
 import { BashPattern, extractBashPatterns } from './bash-patterns.js';
+import { getActiveProfile } from './profile.js';
 
 export type RecKind = 'skill' | 'context' | 'hook' | 'subagent' | 'model' | 'session';
 export type RecSeverity = 'high' | 'medium' | 'low';
-
-export const SKILL_MATCH_OVERLAP = 0.5;
-export const SUBAGENT_EXPLORE_MIN = 15;
-export const BORDERLINE_MIN_RECENT_SIZE = 3;
-export const BORDERLINE_MIN_RECENT_TOKENS = 10_000;
-// Wide-net thresholds — easy to tune up once we see real recs.
-export const BASH_HOOK_MIN_COUNT = 5;
-export const BASH_HOOK_MIN_SESSIONS = 2;
-export const BASH_HOOK_POST_EDIT_RATIO = 0.5;
-export const BASH_HOOK_SESSION_START_MIN = 5;
-export const BASH_HOOK_SESSION_START_RATIO = 0.5;
-export const CLUSTER_SUBAGENT_AVG_EXPLORE_MIN = 10;
 
 export interface Recommendation {
   kind: RecKind;
@@ -151,8 +140,9 @@ function borderlineRecs(
     const c = clusters[i];
     // Skip anything skillRecs already emitted.
     if (c.size >= 3 && c.totalTokens >= 50_000) continue;
-    if (c.recentSize < BORDERLINE_MIN_RECENT_SIZE) continue;
-    if (c.recentTokens < BORDERLINE_MIN_RECENT_TOKENS) continue;
+    const t = getActiveProfile().thresholds;
+    if (c.recentSize < t.borderlineMinRecentSize) continue;
+    if (c.recentTokens < t.borderlineMinRecentTokens) continue;
     const match = findDenylistMatch({ id: c.id, trigrams: c.trigrams }, denylist);
     if (match && !includeHidden) continue;
     const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
@@ -194,7 +184,7 @@ function bestSkillMatch(clusterTrigrams: string[], catalog: SkillCatalogEntry[])
   for (const entry of catalog) {
     if (entry.referenceTrigrams.length === 0) continue;
     const sim = overlapCoefficient(clusterTrigrams, entry.referenceTrigrams);
-    if (sim < SKILL_MATCH_OVERLAP) continue;
+    if (sim < getActiveProfile().thresholds.skillMatchOverlap) continue;
     if (!best || sim > best.similarity) best = { entry, similarity: sim };
   }
   return best;
@@ -216,11 +206,12 @@ function describeCluster(rep: string): string {
 
 function contextRecs(reports: ContextReport[], global: GlobalContextReport): Recommendation[] {
   const out: Recommendation[] = [];
+  const t = getActiveProfile().thresholds;
   // Global CLAUDE.md bloat.
-  if (global.exists && global.estimatedTokens > 4_000) {
+  if (global.exists && global.estimatedTokens > t.contextBloatMediumTokens) {
     out.push({
       kind: 'context',
-      severity: global.estimatedTokens > 10_000 ? 'high' : 'medium',
+      severity: global.estimatedTokens > t.contextBloatHighTokens ? 'high' : 'medium',
       title: `Global ~/.claude/CLAUDE.md is large (~${formatTokens(global.estimatedTokens)} tokens)`,
       body:
         `Your global CLAUDE.md is ${global.lines} lines and gets loaded into every Claude Code session — ` +
@@ -233,10 +224,10 @@ function contextRecs(reports: ContextReport[], global: GlobalContextReport): Rec
   for (const r of reports) {
     // Per-workspace CLAUDE.md bloat.
     const totalTokens = r.totalEstimatedTokens;
-    if (totalTokens > 4_000) {
+    if (totalTokens > t.contextBloatMediumTokens) {
       out.push({
         kind: 'context',
-        severity: totalTokens > 10_000 ? 'high' : 'medium',
+        severity: totalTokens > t.contextBloatHighTokens ? 'high' : 'medium',
         title: `${r.workspaceName}: CLAUDE.md is ~${formatTokens(totalTokens)} tokens`,
         body:
           `Workspace CLAUDE.md(s) total ${r.files.reduce((s, f) => s + f.lines, 0)} lines. ` +
@@ -265,7 +256,7 @@ function contextRecs(reports: ContextReport[], global: GlobalContextReport): Rec
       const totalImported = r.bulkyImports.reduce((s, b) => s + b.estimatedTokens, 0);
       out.push({
         kind: 'context',
-        severity: totalImported > 20_000 ? 'high' : 'medium',
+        severity: totalImported > t.bulkyImportHighTotal ? 'high' : 'medium',
         title: `${r.workspaceName}: large @-imports loading ~${formatTokens(totalImported)} tokens`,
         body:
           `${r.bulkyImports.length} file(s) imported from CLAUDE.md exceed 4k tokens each. ` +
@@ -377,14 +368,15 @@ function bashHookRecs(sessions: Session[]): Recommendation[] {
   const out: Recommendation[] = [];
 
   for (const p of patterns) {
-    if (p.count < BASH_HOOK_MIN_COUNT) continue;
+    const t = getActiveProfile().thresholds;
+    if (p.count < t.bashHookMinCount) continue;
     // Skip single-session patterns — that's just iteration on one task, not a
     // habit worth hooking.
-    if (p.sessionCount < BASH_HOOK_MIN_SESSIONS) continue;
+    if (p.sessionCount < t.bashHookMinSessions) continue;
     const example = p.examples[0] || p.shape;
 
     const postEditRatio = p.postEditCount / p.count;
-    if (postEditRatio >= BASH_HOOK_POST_EDIT_RATIO && p.postEditCount >= BASH_HOOK_MIN_COUNT) {
+    if (postEditRatio >= t.bashHookPostEditRatio && p.postEditCount >= t.bashHookMinCount) {
       out.push({
         kind: 'hook',
         severity: p.count > 25 ? 'high' : 'medium',
@@ -411,8 +403,8 @@ function bashHookRecs(sessions: Session[]): Recommendation[] {
 
     const sessionStartRatio = p.sessionStartCount / p.sessionCount;
     if (
-      p.sessionStartCount >= BASH_HOOK_SESSION_START_MIN &&
-      sessionStartRatio >= BASH_HOOK_SESSION_START_RATIO
+      p.sessionStartCount >= t.bashHookSessionStartMin &&
+      sessionStartRatio >= t.bashHookSessionStartRatio
     ) {
       out.push({
         kind: 'hook',
@@ -557,7 +549,7 @@ function sessionSubagentRecs(sessions: Session[]): Recommendation[] {
   for (const s of sessions) {
     const profile = computeSessionProfile(s);
     if (profile.usedSubagent) continue;
-    if (profile.exploreCount < SUBAGENT_EXPLORE_MIN) continue;
+    if (profile.exploreCount < getActiveProfile().thresholds.subagentExploreMin) continue;
     candidates.push({ session: s, profile });
   }
 
@@ -616,7 +608,7 @@ function clusterSubagentRecs(
     if (n === 0) continue;
     if (anyTask) continue; // user already uses subagents for this cluster
     const avgExplore = totalExplore / n;
-    if (avgExplore < CLUSTER_SUBAGENT_AVG_EXPLORE_MIN) continue;
+    if (avgExplore < getActiveProfile().thresholds.clusterSubagentAvgExploreMin) continue;
 
     const repShort = describeCluster(c.representative);
     const titlePrefix = match ? `[hidden: ${match.reason}] ` : '';
@@ -666,15 +658,21 @@ function modelRecs(sessions: Session[]): Recommendation[] {
   const total = opus + sonnet + haiku + other;
   if (total === 0) return out;
   const opusPct = opus / total;
-  if (opusPct > 0.4) {
+  const profile = getActiveProfile();
+  if (opusPct > profile.thresholds.opusHeavyPct) {
+    const costClause = profile.costFraming
+      ? `Sonnet handles it at roughly a fifth of Opus's per-token cost`
+      : `Sonnet handles it at a fraction of the rate-window cost`;
+    const leverageClause = profile.costFraming
+      ? `Shifting routine sessions to Sonnet is the single highest-leverage move for cutting your bill`
+      : `If you're hitting limits, shifting routine sessions to Sonnet is one of the highest-leverage moves`;
     out.push({
       kind: 'model',
       severity: 'medium',
       title: `Opus accounts for ${Math.round(opusPct * 100)}% of your token usage`,
       body:
         `Opus is great for hard reasoning and architecture, but for a lot of routine work — file reads, ` +
-        `simple edits, well-defined refactors — Sonnet handles it at a fraction of the rate-window cost. ` +
-        `If you're hitting limits, shifting routine sessions to Sonnet is one of the highest-leverage moves.`,
+        `simple edits, well-defined refactors — ${costClause}. ${leverageClause}.`,
       evidence: { opusTokens: opus, sonnetTokens: sonnet, haikuTokens: haiku },
     });
   }
